@@ -200,24 +200,62 @@ unconditionally and `minFixAccuracyMeters` gates only *checkpoint evaluation*, n
 >   These exist so the next walk is never again confounded by something only a conversation revealed.
 > - **Motion gate deleted**; `heldReason` is now `'accuracy' | 'speed'`.
 
+> **RESOLVED (2026-09-05e) — the third trail. Both players tripped the checkpoint with
+> phones closed.** 300 fixes, two players, both confirmed on build 15, backgrounded for
+> 158/164 and 132/136 of their fixes. Five arrivals, and **all 60 in-radius fixes were
+> taken while backgrounded**. The diagnosis held and the fix worked:
+>
+> | provider | Shannon median / p90 | Per median / p90 |
+> |---|---|---|
+> | `gps` | 10.2 m / **32.2 m** | 16.8 m / **26.5 m** |
+> | `fused` | 16.6 m / **100 m** | 29.8 m / **147.3 m** |
+>
+> Medians improve ~40%, but the **tail** is the result: p90 100 m → 32 m and 147 m → 27 m.
+> The bad tail that caused the missed crossing is simply absent on GPS_PROVIDER. It is
+> visible fix-by-fix at the crossings — same phone, same second, two providers:
+> `fused acc 357 m` against `gps acc 18 m` (19 m from the checkpoint, INSIDE);
+> `fused acc 291 m` against `gps acc 19 m` (15 m, INSIDE, 16 satellites).
+
+> **Two negative results, both worth keeping:**
+> - **The OS geofence never fired.** `geofenceArmed: true` on 300/300 fixes and **zero**
+>   `geofenceEnter` rows across five crossings and two players. Shadow mode earned its
+>   keep: **do not build geofence-as-trigger** — armed the whole time, contributed nothing.
+> - **Adaptive sampling cannot be adaptive in this arena.** `samplingMode` read
+>   `'near-checkpoint'` on 100% of fixes, because the furthest any player got from a
+>   checkpoint all walk was **123 m**. Any threshold above ~125 m selects everything here.
+
+> **Built (2026-09-05f) — post-trail fixes:**
+> - **Exit hysteresis** (`EXIT_HYSTERESIS_FACTOR` 1.5 in `functions/src/geofence.ts`). A
+>   player already inside stays inside until they clear 1.5× the radius. Fixes the
+>   duplicate arrivals: the 2026-09-05 latch showed `lastEnterAt` and `lastExitAt`
+>   **1.1 s apart** with three arrival docs in six seconds. Only ever delays an exit, so a
+>   real departure is still recorded.
+> - **GPS request rate limit** (`GPS_FIX_MIN_INTERVAL_MS` 20 s). With proximity gating
+>   unable to be selective in a small arena, this is the lever that actually bounds
+>   battery — and it stops a burst of queued writes firing a satellite request each.
+> - **`NEAR_CHECKPOINT_M` 250 → 150.** A better default for a larger arena; **a no-op for
+>   this one**, and documented as such so nobody mistakes it for the battery fix.
+
 **Outstanding under #82 (continued):**
 
-- **The uncertainty-circle rendering is cancelled** — a product decision, 2026-09-05. `confidenceM`
-  and `stale` still reach both maps and remain useful for tuning, but nothing will draw them.
-- **Off-trail woods bounds what is achievable.** The game is played wandering through unmapped
-  forest, so map matching is out (no path network to snap to) and canopy multipath is a physical
-  floor on accuracy. The realistic ceiling for "where did they go" is post-hoc: pedestrian-motion
-  smoothing weighted by 1/accuracy², run forwards *and* backwards, anchored to step-derived total
-  distance. Not built.
-- **Fix the clock-skew in staleness.** `ageMs` subtracts a Firestore *server* timestamp from the GM
-  device's `Date.now()`, so a skewed GM clock marks everyone permanently stale or never stale.
-  Lower priority now the circles are cancelled, but `stale` is still exported.
-- **Verify the #77 battery grant per phone.** Now quantified: letting a device settle roughly
-  triples median error, and suppresses step delivery at the same time — one root cause, two
-  symptoms. Note `isBatteryOptimized()` fails *open*, so "all set" in the lobby can mean "unreadable"
-  rather than "exempt".
-- **`locationTrail` retention.** Excluded from end-of-game cleanup by design; delete the
-  subcollection after each analysis.
+- **Checkpoint radius stays at 20 m — decided from data, do not widen.** The replay says a
+  20 m radius catches all five crossings on GPS-quality fixes. The earlier "widen to
+  40–50 m" suggestion was based on fused-provider error and is **withdrawn**: widening now
+  would only add false triggers, which in a hidden-trap game punish a player who was never
+  there and cannot dispute it.
+- **Battery cost of continuous GPS is unmeasured.** The walk was 19 minutes; a real game is
+  3.5 hours with the receiver effectively always on in an arena this small. The rate limit
+  should bound it, but nobody has watched a battery curve yet. Measure before a full event.
+- **`satellites` is device-dependent.** Per's handset reports 0 alongside good 18 m fixes
+  (the OEM doesn't populate the legacy extra); Shannon's reports 7–17 properly. Treat 0 as
+  unknown, never as "no satellites".
+- **Trail rows can duplicate** from Cloud Functions at-least-once delivery. Harmless for
+  analysis, but de-duplicate on `(playerId, clientUpdatedAt)` before computing counts.
+- **Fix cadence is unchanged at 17–23 s (p90).** The 1–2 s medians in the third trail are an
+  artifact of paired fused+gps writes, not an improvement. Nothing in this batch touched the
+  location request, and the wake lock showed no effect on cadence in the second trail.
+- **`locationTrail` retention.** Three subcollections now, all excluded from end-of-game
+  cleanup by design. Delete them once the tuning work is done.
 
 **83. GM push fired on every checkpoint crossing.** Reported 2026-09-05: the GM's phone buzzed for
 plain "reached <checkpoint>" arrivals, burying the pushes that actually needed a response.

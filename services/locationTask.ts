@@ -59,16 +59,41 @@ async function hydrateRegions(): Promise<void> {
  * Distance (m) from a checkpoint within which a player is "approaching" and we spend the
  * battery on a satellite-only fix.
  *
- * Sized from the 2026-09-05 failure: a player's backgrounded fixes sat 65–119 m from a
- * checkpoint she walked through. The trigger therefore has to fire on fixes that are
- * themselves badly wrong — 250 m is loose enough that a 100 m error still lands inside
- * it, which is the whole point. Being wrong about *where* someone is doesn't stop you
- * knowing they're *near something*.
+ * The trigger has to fire on fixes that are themselves badly wrong — a player's
+ * backgrounded fixes sat 65–119 m from a checkpoint she walked through — so it must stay
+ * far looser than the checkpoint radius. Being wrong about *where* someone is doesn't
+ * stop you knowing they're *near something*.
+ *
+ * Lowered 250 → 150 after the second trail, though **be honest about what that buys**:
+ * across 300 fixes the furthest any player got from a checkpoint was **123 m**, so in an
+ * arena this size *any* threshold above ~125 m selects every fix, and `samplingMode` read
+ * `'near-checkpoint'` 100% of the time. 150 m is a better default for a larger arena; it
+ * changes nothing for a small one. The lever that actually bounds battery here is
+ * `GPS_FIX_MIN_INTERVAL_MS`, not this.
  */
-const NEAR_CHECKPOINT_M = 250;
+const NEAR_CHECKPOINT_M = 150;
 
 /** How long to wait for a satellite fix before giving up and using the fused one. */
 const GPS_FIX_TIMEOUT_MS = 8000;
+
+/**
+ * Minimum gap between satellite-fix requests (#82).
+ *
+ * The 2026-09-05 trail showed `samplingMode: 'near-checkpoint'` on **100% of fixes** for
+ * both players — not because the threshold was wrong, but because the arena is smaller
+ * than it: the furthest any player got from a checkpoint all walk was 123 m. In a play
+ * area like that, proximity gating cannot be selective, so the only real lever on battery
+ * is how often we're willing to spin up the receiver.
+ *
+ * 20 s is comfortably below the observed inter-fix cadence (17–23 s at p90), so in
+ * practice almost every genuine fix still gets its satellite follow-up; what this stops is
+ * the burst case — the queued writes that flushed a dozen fixes in a second — from firing
+ * a dozen GPS requests.
+ */
+const GPS_FIX_MIN_INTERVAL_MS = 20_000;
+
+/** When the last satellite fix was requested, for the rate limit above. */
+let lastGpsFixAt = 0;
 
 /** Straight-line metres between two coordinates (local equirectangular; fine at this scale). */
 function roughDistanceM(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -167,6 +192,12 @@ async function uploadFix(
   });
 
   if (!near) return;
+
+  // Rate-limit the receiver. A burst of queued writes flushing at once would otherwise
+  // fire a satellite request per write, for no extra information.
+  const now = Date.now();
+  if (now - lastGpsFixAt < GPS_FIX_MIN_INTERVAL_MS) return;
+  lastGpsFixAt = now;
 
   // 2. Near a checkpoint, follow up with a satellite-only fix. A second write is cheap
   //    (the doc is overwritten, the latches are idempotent) and it gives the trail a

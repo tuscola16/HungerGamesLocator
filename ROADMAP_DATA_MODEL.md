@@ -123,6 +123,25 @@ manifest permissions: `WAKE_LOCK`, `ACTIVITY_RECOGNITION`.
 shipping — replayed against the trail it suppressed 556 m and 980 m of two players' genuine
 movement, because Android batches step delivery and a locked phone's listener never fires.
 
+**Server-side constants (`functions/src/geofence.ts`)**
+
+| Constant | Value | Notes |
+|---|---|---|
+| `EXIT_HYSTERESIS_FACTOR` | 1.5 | #82: a player already inside stays inside until they clear 1.5× the radius. Stops boundary jitter reading as repeated exit/re-entry — the 2026-09-05 latch showed `lastEnterAt`/`lastExitAt` 1.1 s apart with three arrivals in six seconds. Only ever delays an exit. |
+
+**Client-side constants (`services/locationTask.ts`)**
+
+| Constant | Value | Notes |
+|---|---|---|
+| `NEAR_CHECKPOINT_M` | 150 | Proximity that triggers a satellite fix. Must stay far looser than the checkpoint radius because it runs on the *fused* position, which was 65–119 m wrong in the field. **A no-op in a small arena**: the third trail's furthest distance to any checkpoint was 123 m. |
+| `GPS_FIX_MIN_INTERVAL_MS` | 20 s | The real battery bound, since proximity gating can't be selective in a small arena. Below the 17–23 s p90 cadence, so genuine fixes still get their satellite follow-up. |
+| `GPS_FIX_TIMEOUT_MS` | 8 s | Falls back to the fused fix; the fused write has already landed regardless. |
+
+> **Checkpoint radius stays 20 m.** Replaying the third trail shows 20 m catches all five
+> crossings on GPS-quality fixes. An earlier recommendation to widen to 40–50 m was based on
+> fused-provider error and is withdrawn — widening now only adds false triggers, which a
+> hidden-trap game cannot surface to the player for dispute.
+
 **`GameConfig.locationTrail`** (existing, #50) is the capture switch — no new config knob. Constants
 (`MAX_PLAUSIBLE_SPEED_MS` 7, `MAX_HOLD_MS` 60 s, `STALE_AFTER_MS` 45 s, and for the motion gate
 `MAX_STRIDE_M` 1.5, `STEP_GATE_SLACK_M` 25, `DOPPLER_MOVING_MS` 0.5) are module-level in

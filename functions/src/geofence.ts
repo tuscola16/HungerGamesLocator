@@ -203,6 +203,13 @@ function distanceMeters(
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+/**
+ * #82: how far beyond a checkpoint's radius a player must get before we record an exit.
+ * 1.5× — wide enough to swallow ordinary GPS jitter at the boundary, narrow enough that a
+ * genuine departure still registers promptly. See the hysteresis note at the exit path.
+ */
+const EXIT_HYSTERESIS_FACTOR = 1.5;
+
 // Cap (meters) on the prev→curr segment we'll interpolate for pass-through detection (#49).
 // Beyond this, the straight-line guess between two fixes is unreliable (the player may have
 // taken a curved path), so we fall back to the point test. Comfortably covers a few minutes
@@ -648,6 +655,25 @@ export const onLocationUpdate = functions
       const trip = tripMap.get(checkpointId) ?? null;
       const tripRef = tripsCol.doc(`${userId}_${checkpointId}`);
 
+      /**
+       * #82 exit hysteresis. A player already inside stays inside until they clear a ring
+       * `EXIT_HYSTERESIS_FACTOR`× the radius — entering at `radius`, leaving only well
+       * beyond it.
+       *
+       * Without this, fix jitter around the boundary reads as a rapid series of genuine
+       * exits and re-entries, each producing a fresh arrival. Field-measured 2026-09-05:
+       * one player's `checkpointTrips` latch recorded `lastEnterAt 22:01:21.406` and
+       * `lastExitAt 22:01:22.534` — **1.1 seconds apart** — and three arrival docs landed
+       * at the same checkpoint within six seconds. With GPS-quality fixes now running
+       * 10–17 m at a 20 m radius, ordinary noise still straddles the boundary, so this is
+       * the mechanism that stops one crossing being reported as several.
+       *
+       * It only ever *delays* an exit; it can't manufacture one, so a player who really
+       * leaves is still recorded as having left, just from slightly further out.
+       */
+      const beyondExitRing = dist > cp.radius * EXIT_HYSTERESIS_FACTOR;
+      const holdingInside = trip?.inside === true && !inRadius && !beyondExitRing;
+
       // Pass-through (#49): the current fix is outside, but the path from the previous fix
       // to it clips the radius and the player wasn't already inside — i.e. they crossed
       // between two sparse (locked-phone) fixes with no fix landing in the circle. Only
@@ -684,6 +710,10 @@ export const onLocationUpdate = functions
           }
         }
       }
+
+      // #82: inside the hysteresis band — outside the radius but not yet clear of the exit
+      // ring. Stay latched: no exit, no re-arrival, no streak reset. The next fix decides.
+      if (holdingInside) continue;
 
       // --- Exit path: player was inside, now outside (and not a fresh pass-through) ---
       if (!inRadius && !passThrough) {
