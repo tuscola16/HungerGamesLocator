@@ -165,20 +165,49 @@ async function handleDeath(
   }
 }
 
+/**
+ * Fan a safety alert out to everyone who can respond to it (#94).
+ *
+ * **Recipients: every GM, plus every player already out of the game — never a living
+ * player.** The dead are the standing rescue crew: they are off the board, already walking
+ * out of the arena, and (with #99) hold a map showing the boundary and every checkpoint, so
+ * they can reach someone faster than a GM at the far end of the woods. Living players are
+ * excluded because reaching a casualty would mean walking to them, and a safety alert must
+ * never become a hunting beacon.
+ *
+ * The alert reads identically whoever sent it, alive or dead — it means one thing.
+ */
 async function handleSos(
   gameRef: FirebaseFirestore.DocumentReference,
   player: MemberData
 ): Promise<void> {
-  const gmsSnap = await gameRef.collection('members').where('role', '==', 'gm').get();
-  const gms = gmsSnap.docs.map((d) => d.data() as MemberData);
-  const gmTokens = gms.map((m) => m.fcmToken).filter((t): t is string => !!t);
+  // One roster read instead of a filtered query: the `out` half can't be expressed as an
+  // equality on a field that is absent on living members, and a game roster is a dozen docs.
+  const membersSnap = await gameRef.collection('members').get();
+  const members = membersSnap.docs.map((d) => ({
+    ...(d.data() as MemberData),
+    userId: (d.data() as MemberData).userId ?? d.id,
+  }));
+
+  const gms = members.filter((m) => m.role === 'gm');
+  // Never echo the alert back to the sender — a dead player raising their own SOS should not
+  // get their own push. Identified by uid, since the doc id IS the uid.
+  const deadPlayers = members.filter(
+    (m) => m.role !== 'gm' && m.out === true && m.userId !== player.userId
+  );
+
+  const tokens = [...gms, ...deadPlayers].map((m) => m.fcmToken).filter((t): t is string => !!t);
+  // SMS stays GM-only. It is the escalation channel of last resort (a muted or asleep phone,
+  // Rule 25) and it costs real money per message; a dead player already has the push and is
+  // holding the app. Widening it is a Twilio bill, not a safety improvement.
   const gmPhones = gms.map((m) => m.phone).filter((p): p is string => !!p);
+
   const name = player.displayName ?? 'A player';
   const body = `${name} needs assistance`;
   // Push + SMS in parallel: a muted/asleep phone (Rule 25) shouldn't swallow a
   // safety alert, and Outdoor GM is now the only safety channel (replaces Pingo).
   await Promise.allSettled([
-    sendPushToTokens(gmTokens, '🆘 Safety alert', body, 'arrivals'),
+    sendPushToTokens(tokens, '🆘 Safety alert', body, 'arrivals'),
     sendArrivalSMS(gmPhones, `SAFETY ALERT: ${body}`),
   ]);
 }

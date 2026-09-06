@@ -317,11 +317,21 @@ export default function PlayerGameScreen() {
     if (gameId) AsyncStorage.setItem(`tutorial_seen_${gameId}`, '1').catch(() => {});
   }
 
-  // Whether we should be sharing location: in the lobby *and* during play (#16), unless
-  // out. A single stable boolean so the lifecycle effect below doesn't churn on unrelated
-  // re-renders. Lobby fixes don't trigger checkpoints — the geofence fires only in `play`.
+  // Whether we should be sharing location: in the lobby *and* during play (#16). A single
+  // stable boolean so the lifecycle effect below doesn't churn on unrelated re-renders.
+  // Lobby fixes don't trigger checkpoints — the geofence fires only in `play`.
   // #41: tracking continues through the end-game showdown — players are still on the map.
-  const shouldTrack = !!gameId && (phase === 'lobby' || phase === 'play' || phase === 'endgame') && !out;
+  //
+  // #94/#99: the `&& !out` gate is GONE. A dead player keeps uploading, because that is
+  // exactly who needs finding: their safety alert is then backed by a live position instead
+  // of a stale one (#94), and cleanup has to locate people still in the woods (#84). Two
+  // things make it safe to keep the fixes flowing: the geofence function returns early on
+  // `member.out`, so a dead player can never trip a checkpoint or a runbook effect; and both
+  // GM maps filter dead players out of the display, so the screen stays readable. Tracking
+  // still stops at `results` — the game is over and nobody is paging anyone.
+  // #84: it also runs through `cleanup`, which is the phase whose whole job is finding people.
+  const shouldTrack =
+    !!gameId && (phase === 'lobby' || phase === 'play' || phase === 'endgame' || phase === 'cleanup');
 
   // Latest tracking params, held in refs so the start/stop lifecycle effect can read them
   // without listing displayName/batterySaver as deps (#35) — a late-arriving displayName or
@@ -498,7 +508,9 @@ export default function PlayerGameScreen() {
               } catch {
                 /* location unavailable — skip the pin */
               }
-              await stopLocationTracking();
+              // #94/#99: tracking deliberately CONTINUES after death — no stop here. The
+              // dead are the rescue case (a live fix behind their safety alert) and the
+              // cleanup crew (#84). The geofence ignores them, so nothing can be tripped.
             } catch (err) {
               Alert.alert('Error', friendlyError(err));
             }
@@ -511,7 +523,10 @@ export default function PlayerGameScreen() {
   function handleSos() {
     Alert.alert(
       'Send safety alert?',
-      'This notifies the Game Master that you need assistance (Rule 22). Use it if you feel unsafe, are injured, or are too cold to continue.',
+      // #94: the fan-out is GMs *and* everyone already out of the game — the dead are the
+      // standing rescue crew, and saying so is the reassuring part, not a leak (#99 tells
+      // players about the spectator role in the tutorial before they ever die).
+      'This notifies your Game Masters — and anyone already out of the game, who can come to you — that you need assistance (Rule 22). Use it if you feel unsafe, are injured, or are too cold to continue.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -523,13 +538,11 @@ export default function PlayerGameScreen() {
             // write and delivers it on reconnect, so confirm immediately rather than
             // blocking on the network — a safety alert must feel instant in a dead zone.
             raiseSos(gameId, user.uid).catch((err: Error) => console.error('[SOS] raiseSos failed', err));
+            // #94: the same promise alive or dead — the `!out` tracking gate is lifted, so a
+            // dead player's position is live too, and the alert is backed by a real fix.
             Alert.alert(
               'Alert sent',
-              out
-                // Tracking stops at death (#94: the lift is still to come), so don't
-                // promise a live position the GM doesn't have.
-                ? "The Game Master has been notified and can see your last known location. If you're offline, it sends the moment you reconnect."
-                : "The Game Master has been notified and can see your location. If you're offline, it sends the moment you reconnect."
+              "The Game Master has been notified and can see your location. If you're offline, it sends the moment you reconnect."
             );
           },
         },

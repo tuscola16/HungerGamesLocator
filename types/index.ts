@@ -22,9 +22,20 @@ export type GameStatus = 'active' | 'ended';
  * - `endgame` — GM-triggered "final showdown" (#41): a labeled stretch between `play` and
  *               `results` that rallies players to a convergence point. Live systems (tracking,
  *               boundary, SOS, geofence) keep running; only the ration loop turns off.
+ * - `cleanup` — The victor has been declared but the game is NOT closed (#84). The recovery
+ *               job — collecting every prop from every checkpoint and accounting for every
+ *               person still in the woods — happens here, with the arena fully lit: mutual
+ *               player↔player and player↔GM map visibility, and every checkpoint projected
+ *               into `markers`. `status` stays `'active'`; runbook effects are suppressed so
+ *               nobody trips the trap they were sent to retrieve.
  * - `results` — Game over; players can see how they did.
+ *
+ * **Forward-compat.** `'cleanup'` is unknown to every binary shipped before 2026-09-06.
+ * Clients branch per phase, so an old client would land on no branch at all; both shells
+ * therefore funnel unknown phases through `isWaitingOrUnknown`-style fallbacks, and the GM's
+ * **Close Game** stays reachable so nobody is stranded mid-recovery.
  */
-export type GamePhase = 'setup' | 'lobby' | 'play' | 'endgame' | 'results';
+export type GamePhase = 'setup' | 'lobby' | 'play' | 'endgame' | 'cleanup' | 'results';
 
 /** Play-area boundary, defined by the GM from a map view. */
 export interface MapBoundary {
