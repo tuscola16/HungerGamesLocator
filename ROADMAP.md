@@ -460,8 +460,16 @@ phase between them.
 > **Built (2026-09-06), the roster list:** the icon strip is replaced by a single ⋯ button
 > opening a labelled action sheet (status & message, ack/stand-down SOS, district, promote/demote,
 > revive, eliminate, remove). Handlers are untouched, so every existing confirmation still guards
-> the destructive ones; the row now carries status only. **The district chip stays inline on
-> purpose** — it is the sole inline *display* of a district and is already labelled text, not one of
+> the destructive ones; the row now carries status only.
+>
+> **Platform gotcha worth keeping:** iOS cannot present anything while a Modal is dismissing, so
+> closing the sheet and raising the action's `Alert` (or the district editor's Modal) in the same
+> tick silently drops it — the sheet closes and nothing happens. The action is therefore deferred to
+> the Modal's `onDismiss`, which is **iOS-only**; Android has no such restriction and runs it
+> immediately, because it would otherwise wait for a callback that never fires.
+>
+> **The district chip stays inline on purpose** — it is the sole inline *display* of a district
+> and is already labelled text, not one of
 > the unlabeled icons this item was about; it is offered in the sheet as well.
 >
 > **Still outstanding:** the same treatment on the player *detail* screen (85.2).
@@ -621,8 +629,10 @@ endgame, cleanup, results.
 
 **95. Show new map drops as new.**
 > **Built (2026-09-06):** `RevealedMarkerPin` takes an `isNew` flag — primary-coloured ring plus a
-> badge dot — driven by a per-game "seen" set in AsyncStorage on the player screen. Until-seen, and
-> "seen" advances only while the map tab is actually up, after a 5 s dwell so a marker that lands
+> badge dot (inside a padded wrapper — **Android clips children that fall outside their parent's
+> bounds**, so a badge hung off the pin's corner never renders) — driven by a per-game "seen" set
+> in AsyncStorage on the player screen. Until-seen, and "seen" advances only while the map tab is
+> actually up, after a 5 s dwell so a marker that lands
 > under the player's eyes still reads as new. The record also stamps a `since` time on this
 > device's first open of the game, and anything revealed before it is never "new" — otherwise every
 > always-shown checkpoint would light up at once on the screen a player uses to get their bearings.

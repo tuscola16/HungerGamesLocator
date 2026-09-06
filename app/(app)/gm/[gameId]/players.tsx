@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  FlatList, Alert, Modal, TextInput
+  FlatList, Alert, Modal, TextInput, Platform
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -58,10 +58,34 @@ export default function PlayersScreen() {
   // icons, so "eliminate" and "remove" can't be mistaken for the routine actions they used
   // to sit beside.
   const [actionMenu, setActionMenu] = useState<GameMember | null>(null);
-  /** Run a row action and close the sheet. Handlers keep their own confirmations. */
+  // Held between closing the sheet and the dismissal actually completing — see runAction.
+  const pendingAction = useRef<(() => void) | null>(null);
+
+  /**
+   * Run a row action and close the sheet. Handlers keep their own confirmations.
+   *
+   * iOS cannot present anything while a Modal is dismissing: an `Alert.alert` (every
+   * destructive action here opens one) or a second Modal (the district editor) raised in
+   * the same tick is silently dropped, so the sheet would just close and nothing would
+   * happen. Defer to the Modal's `onDismiss`, which fires once it has really gone.
+   * `onDismiss` is iOS-only, and Android has no such restriction, so Android keeps running
+   * the action immediately rather than waiting for a callback that never comes.
+   */
   function runAction(fn: () => void) {
+    if (Platform.OS === 'ios') {
+      pendingAction.current = fn;
+      setActionMenu(null);
+      return;
+    }
     setActionMenu(null);
     fn();
+  }
+
+  /** iOS only: the sheet has finished dismissing, so it is safe to present again. */
+  function runPendingAction() {
+    const fn = pendingAction.current;
+    pendingAction.current = null;
+    fn?.();
   }
 
   // userId → last location fix (ms), for the stale-fix indicator. Outdoor GM is the
@@ -373,6 +397,7 @@ export default function PlayersScreen() {
         transparent
         animationType="fade"
         onRequestClose={() => setActionMenu(null)}
+        onDismiss={runPendingAction}
       >
         <TouchableOpacity
           style={styles.modalBackdrop}

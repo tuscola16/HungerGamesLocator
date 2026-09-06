@@ -197,7 +197,10 @@ function RevealedMarkerPin({ marker, isNew }: { marker: RevealedMarker; isNew?: 
       anchor={{ x: 0.5, y: 0.5 }}
       tracksViewChanges={tracks}
     >
-      <View>
+      {/* The padding is load-bearing: Android clips children that fall outside their
+          parent's bounds, so a badge hung off the pin's corner would simply not render.
+          It is applied for both states so the pin doesn't shift when the flag clears. */}
+      <View style={styles.markerWrap}>
         <IconPin icon={marker.icon} color={isNew ? Colors.primary : Colors.secondary} />
         {isNew && <View style={styles.newMarkerDot} />}
       </View>
@@ -384,9 +387,11 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontSize: 12,
   },
-  // #95: "new since you last looked" badge on a revealed marker.
+  // #95: "new since you last looked" badge on a revealed marker. Sits inside the padded
+  // wrapper, not hanging off the pin, so Android renders it.
+  markerWrap: { padding: 7 },
   newMarkerDot: {
-    position: 'absolute', top: -2, right: -2,
+    position: 'absolute', top: 0, right: 0,
     width: 12, height: 12, borderRadius: 6,
     backgroundColor: Colors.primary,
     borderWidth: 2, borderColor: Colors.background,
