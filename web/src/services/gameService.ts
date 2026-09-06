@@ -252,7 +252,15 @@ export function formatEventDate(ts: FsTimestamp | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/** Update the play-area boundary, rules text, event date, and/or per-GM config during setup. */
+/**
+ * Update the play-area boundary, rules text, event date, and/or per-GM config during setup.
+ *
+ * `config` is a **partial merge** — see the mirror of this function in the mobile app
+ * (`services/gameService.ts`) for why it must be written as dot-notation field paths.
+ * Short version: `updateDoc` replaces a nested map wholesale, so `{ config: {...} }` was
+ * deleting every knob the Game-settings form doesn't expose. Fixed 2026-09-06; keep the two
+ * copies in step.
+ */
 export async function updateGameConfig(
   gameId: string,
   updates: {
@@ -263,7 +271,15 @@ export async function updateGameConfig(
     gameDate?: FsTimestamp | null;
   }
 ): Promise<void> {
-  await updateDoc(doc(db, Collections.GAMES, gameId), updates);
+  const { config, ...topLevel } = updates;
+  // `UpdateData<DocumentData>` is how the web SDK types a dot-notation patch; the mobile
+  // SDK is looser and takes a plain object, which is the only difference between the two
+  // copies of this function.
+  const patch: UpdateData<DocumentData> = { ...topLevel };
+  for (const [key, value] of Object.entries(config ?? {})) {
+    if (value !== undefined) patch[`config.${key}`] = value;
+  }
+  await updateDoc(doc(db, Collections.GAMES, gameId), patch);
 }
 
 /**

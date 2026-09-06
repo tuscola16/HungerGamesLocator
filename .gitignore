@@ -38,3 +38,8 @@ expo-env.d.ts
 # @end expo-cli
 
 .firebase/
+
+# Post-game field captures pulled from Firestore before `cleanupOnGameEnd` purges
+# them. Real player names + GPS tracks, so these stay out of git deliberately —
+# they are kept locally (and via OneDrive) for tuning the geofence constants.
+field-data/

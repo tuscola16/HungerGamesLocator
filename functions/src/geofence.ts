@@ -210,11 +210,73 @@ function distanceMeters(
  */
 const EXIT_HYSTERESIS_FACTOR = 1.5;
 
-// Cap (meters) on the prev→curr segment we'll interpolate for pass-through detection (#49).
-// Beyond this, the straight-line guess between two fixes is unreliable (the player may have
-// taken a curved path), so we fall back to the point test. Comfortably covers a few minutes
-// of walking between throttled background fixes while rejecting implausible GPS teleports.
-const MAX_SEGMENT_METERS = 400;
+// Default cap (meters) on the prev→curr segment we'll interpolate for pass-through
+// detection (#49) **on the segment's geometry alone**;
+// `GameConfig.passThroughMaxSegmentMeters` overrides it, 0 disables pass-through entirely.
+// Beyond this the straight-line guess between two fixes is unreliable (the player may have
+// taken a curved path), so we fall back to the point test.
+//
+// Was a hard-coded 400 m until 2026-09-06. Stonedam Day 2 showed what that bought: nine
+// arrivals recorded more than 100 m from their checkpoint's centre, topping out at 295 m
+// (Payne / The Old Dam) and 245 m (Gus / snowmobile access point). A 400 m line drawn
+// between two consecutive fixes sweeps a corridor across most of a play area this size and
+// will clip a 20 m circle somewhere along it almost by construction. 150 m is roughly two
+// minutes of walking — still comfortably longer than the throttled background cadence this
+// mechanism exists to cover.
+const DEFAULT_MAX_SEGMENT_METERS = 150;
+
+/**
+ * Absolute cap (m) on an interpolated segment **when the pedometer positively confirms the
+ * player walked it**.
+ *
+ * A flat 150 m cap would be too blunt on its own, and replaying Stonedam Day 2 says so:
+ * it withdraws two crossings that were each a player's only arrival at that checkpoint,
+ * and one of them (Gus, snowmobile access point, 245 m) fired a real runbook hint and
+ * revealed a marker to him. Whether that crossing was genuine is not a question a length
+ * threshold can answer — but it is exactly the question the step counter can.
+ *
+ * So the cap is tiered. Up to `passThroughMaxSegmentMeters` a crossing is believed on
+ * geometry (subject to the step check being able to *veto* it); between that and this
+ * ceiling it is believed **only** on positive step evidence. Past this, nothing: no
+ * plausible background cadence puts two consecutive fixes 400 m apart on foot, so the
+ * receiver moved, not the player.
+ */
+const CORROBORATED_MAX_SEGMENT_METERS = 400;
+
+/**
+ * Assumed metres per step when checking a #49 pass-through against the pedometer.
+ * 0.75 m is a conventional adult walking step; broken ground makes real steps shorter,
+ * which biases the check toward *accepting* a crossing — the safe direction.
+ */
+const STEP_LENGTH_M = 0.75;
+
+/**
+ * Fraction of the geometrically-implied step count we actually demand. 0.5 leaves a wide
+ * margin for a short-strided player, a partially-flushed batch, or a phone carried in a
+ * hand rather than a pocket, while still being nowhere near the ~0 steps a stationary
+ * player racks up while their receiver wanders 150 m.
+ */
+const MIN_STEP_FRACTION = 0.5;
+
+/**
+ * How far apart two fixes must be (ms) before their step delta is worth believing.
+ *
+ * This is the constant that makes the retry viable where the 2026-09-05 attempt failed.
+ * Android delivers step counts in batches, so adjacent fixes 3–15 s apart routinely read
+ * a delta of 0 mid-walk — the earlier gate compared exactly those and suppressed 556 m and
+ * 980 m of two players' real movement. Over 45 s a batch has flushed, and the pass-through
+ * case is *by definition* the sparse-fix case: a 150 m segment is about two minutes of
+ * walking. Below this gap we decline to judge rather than judging badly.
+ */
+const STEP_LOOKBACK_MS = 45_000;
+
+/**
+ * Floor (m) under the per-checkpoint accuracy gate. A 10 m checkpoint would otherwise
+ * demand 20 m accuracy, which a phone under canopy rarely reaches — the gate would reject
+ * every fix and the checkpoint would never fire at all. Silence is a worse failure than
+ * imprecision, so no checkpoint may demand better than this.
+ */
+const MIN_ACCURACY_FLOOR_M = 25;
 
 /** Distance (m) from point P to segment AB, via a local equirectangular projection centered
  * on P — accurate at geofence scales (<~1 km). Powers #49 pass-through detection. */
@@ -307,6 +369,8 @@ interface CachedMember {
   fcmToken?: string;
   district?: string | number;
   outOfBounds?: boolean;
+  /** #94: eliminated / tapped out. Dead players never trip checkpoints. */
+  out?: boolean;
 }
 const memberCache = new Map<string, { data: CachedMember | null; expires: number }>();
 
@@ -323,6 +387,7 @@ async function getMemberCached(gameId: string, uid: string): Promise<CachedMembe
         fcmToken: m.fcmToken as string | undefined,
         district: m.district as string | number | undefined,
         outOfBounds: m.outOfBounds === true,
+        out: m.out === true,
       }
     : null;
   memberCache.set(key, { data, expires: Date.now() + CP_CACHE_TTL_MS });
@@ -374,6 +439,34 @@ export const onLocationUpdate = functions
         ? { latitude: prevData.latitude, longitude: prevData.longitude }
         : null;
 
+    /**
+     * Steps taken between the previous fix and this one, or null when the delta can't be
+     * trusted (2026-09-06 step corroboration).
+     *
+     * `change.before.updateTime` is the server's own commit time for the previous fix —
+     * used in preference to the client's `updatedAt`, because a fix that sat on the device
+     * and was delivered late is exactly the case where a client clock would mislead us.
+     *
+     * Null in every ambiguous case, and the callers treat null as "don't judge":
+     *  - no previous fix, or either reading missing (no pedometer / permission declined);
+     *  - the counter went backwards, meaning tracking restarted between fixes, not that
+     *    the player walked backwards;
+     *  - the two fixes are closer together than `STEP_LOOKBACK_MS`, where Android's
+     *    batched delivery makes a 0 delta meaningless.
+     */
+    const prevFixAtMs = change.before.updateTime?.toMillis?.() ?? null;
+    const fixGapMs = prevFixAtMs != null ? Date.now() - prevFixAtMs : null;
+    const stepsSincePrev =
+      typeof location.steps === 'number' &&
+      typeof prevSteps === 'number' &&
+      location.steps >= prevSteps
+        ? location.steps - prevSteps
+        : null;
+    const trustedStepsSincePrev =
+      stepsSincePrev != null && fixGapMs != null && fixGapMs >= STEP_LOOKBACK_MS
+        ? stepsSincePrev
+        : null;
+
     // Only fire checkpoint arrivals while the game is in play. Players upload location
     // during the lobby too (#16) — lobby fixes must never trigger a checkpoint. The game
     // doc is cached (#16): a burst of fixes reuses one read.
@@ -390,6 +483,12 @@ export const onLocationUpdate = functions
       geofenceConfirmFixes?: number;
       tripIntervalMinutes?: number;
       locationTrail?: boolean;
+      // 2026-09-06 Stonedam post-mortem knobs.
+      accuracyRadiusFactor?: number;
+      passThroughMaxSegmentMeters?: number;
+      stepCorroboration?: boolean;
+      reArrivalCooldownMinutes?: number;
+      trustOsGeofence?: boolean;
     };
     // Field-measured 2026-08-14: a pocketed Android phone with the screen locked reports
     // ~52m accuracy while walking, and ~16m only when stationary with the app open. The old
@@ -398,12 +497,40 @@ export const onLocationUpdate = functions
     // ABOVE this gate and only checkpoint evaluation is skipped.
     // 100m accepts pocketed fixes. It is deliberately blunt: a fix accurate to only 100m can
     // trigger a smaller checkpoint from outside it, so `geofenceConfirmFixes` (2) is doing
-    // real work here. The better fix is a per-checkpoint gate judged against that
-    // checkpoint's own radius; this default is the stopgap until then.
+    // real work here.
+    //
+    // As of 2026-09-06 this is the *ceiling* rather than the whole gate — `accuracyRadiusFactor`
+    // below adds the per-checkpoint test this comment has been promising. Stonedam Day 2
+    // priced the stopgap: every checkpoint had a 20 m radius, so a 99 m fix cleared this
+    // gate and was then asked whether it was within 20 m of a point, and 44 of 198 arrivals
+    // were recorded from outside the circle.
     const minFixAccuracy = rawConfig.minFixAccuracyMeters ?? 100;
     const confirmFixes = rawConfig.geofenceConfirmFixes ?? 2;
     // #67: re-evaluate a lingering player's runbook entries at most this often (default 2 min).
     const tripIntervalMs = Math.max(0, rawConfig.tripIntervalMinutes ?? 2) * 60_000;
+
+    // --- 2026-09-06 geofence-quality knobs (see GameConfig for the field evidence) ---
+    /** Per-checkpoint accuracy multiplier; 0 disables and leaves only the flat ceiling. */
+    const accuracyRadiusFactor = Math.max(0, rawConfig.accuracyRadiusFactor ?? 2);
+    /** Longest interpolated #49 segment; 0 disables pass-through detection. */
+    const maxSegmentMeters = Math.max(
+      0,
+      rawConfig.passThroughMaxSegmentMeters ?? DEFAULT_MAX_SEGMENT_METERS
+    );
+    /** Ask the pedometer whether an inferred crossing describes a walk that happened. */
+    const stepCorroboration = rawConfig.stepCorroboration !== false;
+    /** Backstop against repeat arrivals that #82 hysteresis structurally can't catch. */
+    const reArrivalCooldownMs = Math.max(0, rawConfig.reArrivalCooldownMinutes ?? 5) * 60_000;
+    /** Promote #82 shadow mode: let an OS Enter event confirm a crossing. */
+    const trustOsGeofence = rawConfig.trustOsGeofence !== false;
+    /**
+     * Did the OS's own geofence report entering a checkpoint on this upload? Set by the
+     * client's geofence wake-up task. Recorded since #82; acted on since 2026-09-06.
+     */
+    const osEnteredCheckpointId =
+      trustOsGeofence && typeof location.geofenceEnter === 'string'
+        ? location.geofenceEnter
+        : null;
 
     // Skip if the player is a GM (GMs don't trigger checkpoint arrivals). The member doc is
     // cached (#16); the mutable `outOfBounds` field is written through below.
@@ -487,20 +614,24 @@ export const onLocationUpdate = functions
           gpsFixAttempted: location.gpsFixAttempted ?? null,
           buildVersion: location.buildVersion ?? null,
           geofenceArmed: location.geofenceArmed ?? null,
-          // Shadow mode: what Android's own geofence claimed, recorded beside what our
-          // distance maths concluded, so the two can be compared after the fact.
+          // What Android's own geofence claimed, recorded beside what our distance maths
+          // concluded so the two can still be compared after the fact. No longer shadow-
+          // only: since 2026-09-06 this also confirms a crossing (`trustOsGeofence`).
           geofenceEnter: location.geofenceEnter ?? null,
           // Steps taken since the previous fix — pair with `metersSincePrev` to separate
           // "they walked" from "the fix moved but they didn't".
           // A negative delta means the counter reset between fixes (the player left and
           // rejoined, or the app process was recycled), not that they walked backwards —
           // record null rather than a number that would silently corrupt the analysis.
-          stepsSincePrev:
-            typeof location.steps === 'number' &&
-            typeof prevSteps === 'number' &&
-            location.steps >= prevSteps
-              ? location.steps - prevSteps
-              : null,
+          stepsSincePrev,
+          // Gap to the previous fix, from the server's own commit times. The number that
+          // says whether a `stepsSincePrev` of 0 means "stood still" or merely "Android
+          // hasn't flushed the batch yet" — and, read across a game, how long players
+          // actually go between usable fixes.
+          fixGapMs,
+          // The delta the crossing logic was willing to act on: `stepsSincePrev` once the
+          // gap clears `STEP_LOOKBACK_MS`, null while it's too short to judge.
+          trustedStepsSincePrev,
           // Movement since the previous fix — the signal that separates "the phone stopped
           // reporting" from "the phone reported a position that didn't move".
           metersSincePrev: prevLoc
@@ -548,6 +679,22 @@ export const onLocationUpdate = functions
         );
       }
     }
+
+    // #94: a dead player never trips a checkpoint. This already matters without any client
+    // change — the offline write queue (#4) can flush a fix captured *before* the death,
+    // which would fire a hazard at someone who is already out — and it is the prerequisite
+    // for letting dead players keep uploading at all (#94 rescue path, #99.3 spectator map).
+    //
+    // Deliberately gated HERE rather than at the member lookup: everything above this line
+    // should still run for a dead player once they keep uploading — the locationTrail
+    // breadcrumb (#82 tuning data) and, more importantly, the boundary-exit alert (#7),
+    // which is a *safety* signal and never more relevant than for someone walking out of
+    // the arena alone. Only checkpoint/runbook resolution is suppressed.
+    //
+    // The member cache is short-TTL (15 s), so a crossing in the seconds right after an
+    // elimination can still slip through; that is the same window the boundary latch
+    // already accepts.
+    if (member.out) return;
 
     // GPS quality gate (#50): poor fixes are rejected from checkpoint eval — the map dot
     // still updates via the location write above. Reject is for checkpoint eval only.
@@ -656,6 +803,47 @@ export const onLocationUpdate = functions
       const tripRef = tripsCol.doc(`${userId}_${checkpointId}`);
 
       /**
+       * Did the OS's own geofence say the player entered *this* checkpoint on this upload?
+       *
+       * Independent corroboration from the platform's low-power location stack, which
+       * keeps running in Doze when our own cadence has collapsed. Used two ways below: it
+       * relaxes the per-checkpoint accuracy gate back to the flat ceiling, and it stands
+       * in for the `geofenceConfirmFixes` streak.
+       */
+      const osCorroborated = osEnteredCheckpointId === checkpointId;
+
+      /**
+       * Per-checkpoint accuracy gate (2026-09-06).
+       *
+       * A fix may only vote on a checkpoint whose radius its own error bar can actually
+       * resolve. At the default factor of 2 a 20 m checkpoint demands 40 m accuracy, held
+       * between `MIN_ACCURACY_FLOOR_M` (so a tiny checkpoint can't demand the impossible
+       * and fall permanently silent) and `minFixAccuracy` (never *looser* than the flat
+       * ceiling the fix already cleared).
+       *
+       * An OS-corroborated fix is exempt down to the flat ceiling: we have a second,
+       * independent witness that the player is here, so the fix's own precision matters
+       * less. This is the promotion of #82 shadow mode that pays for itself — the coarse
+       * pocketed fixes this gate rejects are precisely the ones the OS geofence is best at
+       * catching.
+       */
+      const cpAccuracyLimit = osCorroborated
+        ? minFixAccuracy
+        : accuracyRadiusFactor > 0
+          ? Math.min(
+              minFixAccuracy,
+              Math.max(MIN_ACCURACY_FLOOR_M, cp.radius * accuracyRadiusFactor)
+            )
+          : minFixAccuracy;
+
+      // Too coarse to judge this checkpoint. `continue` without touching the trip: a fix
+      // we can't read is not evidence of leaving, so it must not reset a partial streak or
+      // trip the exit path. The next usable fix decides. (A player who leaves while every
+      // fix is unreadable stays latched inside — the same fail-safe direction as the #82
+      // hysteresis, and preferable to a phantom exit followed by a phantom re-arrival.)
+      if (location.accuracy != null && location.accuracy >= cpAccuracyLimit) continue;
+
+      /**
        * #82 exit hysteresis. A player already inside stays inside until they clear a ring
        * `EXIT_HYSTERESIS_FACTOR`× the radius — entering at `radius`, leaving only well
        * beyond it.
@@ -700,13 +888,67 @@ export const onLocationUpdate = functions
             prevLoc.latitude, prevLoc.longitude,
             location.latitude, location.longitude
           );
-          if (segLen > 0 && segLen <= MAX_SEGMENT_METERS) {
+          const segCeiling = stepCorroboration
+            ? Math.max(maxSegmentMeters, CORROBORATED_MAX_SEGMENT_METERS)
+            : maxSegmentMeters;
+
+          if (segLen > 0 && maxSegmentMeters > 0 && segLen <= segCeiling) {
             const segDist = pointToSegmentMeters(
               cp.latitude, cp.longitude,
               prevLoc.latitude, prevLoc.longitude,
               location.latitude, location.longitude
             );
             passThrough = segDist <= cp.radius;
+
+            /**
+             * Step corroboration (2026-09-06). A pass-through asserts something specific
+             * and checkable: that the player *walked* `segLen` metres between these two
+             * fixes. The pedometer counts on a coprocessor that keeps running through
+             * Doze, so it can be asked.
+             *
+             * Only ever used to withdraw an inference no fix witnessed — never to move,
+             * hold, or suppress a player's actual position. That asymmetry is the whole
+             * design: the counter under-reports and never over-reports, so "lots of steps"
+             * is evidence and "few steps" is only evidence once the window is long enough
+             * for a batch to have flushed. `trustedStepsSincePrev` is null until then.
+             *
+             * Two tiers, because "how long was the line" and "did they walk it" are
+             * different questions:
+             *
+             *  - **Within `maxSegmentMeters`** the geometry is plausible on its own, so
+             *    null (no usable step data) accepts. Steps can still veto.
+             *  - **Beyond it, up to `CORROBORATED_MAX_SEGMENT_METERS`**, the geometry is
+             *    not plausible on its own and positive step evidence is *required*; null
+             *    rejects. This is what keeps a genuine long sparse-fix crossing — a
+             *    locked phone that went quiet for four minutes while its owner walked —
+             *    without also keeping the receiver drift that looks identical on a map.
+             *
+             * Stonedam Day 2 is what this is aimed at: Payne credited with The Old Dam
+             * from 295 m away, and with the snowmobile access point from 210 m and 245 m,
+             * inside bursts where six "crossings" landed in 2 m 41 s. A player standing
+             * still while their receiver wanders that far takes almost no steps — and one
+             * genuinely walking that far cannot help but take them.
+             */
+            if (passThrough && stepCorroboration) {
+              const stepsNeeded = (segLen / STEP_LENGTH_M) * MIN_STEP_FRACTION;
+              const corroborated =
+                trustedStepsSincePrev != null && trustedStepsSincePrev >= stepsNeeded;
+              const needsCorroboration = segLen > maxSegmentMeters;
+
+              if (!corroborated && (needsCorroboration || trustedStepsSincePrev != null)) {
+                passThrough = false;
+                functions.logger.info('[geofence] pass-through rejected', {
+                  gameId, userId, checkpointId, checkpointName: cp.name,
+                  segLen: Math.round(segLen),
+                  steps: trustedStepsSincePrev,
+                  stepsNeeded: Math.round(stepsNeeded),
+                  fixGapMs,
+                  reason: trustedStepsSincePrev == null
+                    ? 'long segment, no usable step data'
+                    : 'step count too low for the distance',
+                });
+              }
+            }
           }
         }
       }
@@ -754,8 +996,15 @@ export const onLocationUpdate = functions
       // --- Accumulate streak toward confirmation (#50 debounce) ---
       // A pass-through (#49) skips the streak — the player is already gone, so there's no
       // chance to gather consecutive in-radius fixes; the segment crossing confirms it.
+      //
+      // An OS-corroborated in-radius fix skips it too (2026-09-06). The streak exists to
+      // stop a lone jumpy fix creating a crossing; a platform geofence Enter event *is* a
+      // second independent witness, so waiting for another of our own fixes only adds
+      // latency — and latency at the checkpoint is the problem the OS geofence was armed
+      // to solve in the first place. It does not widen the radius: the position still had
+      // to be `inRadius` to get here.
       const newStreak = (trip?.insideStreak ?? 0) + 1;
-      if (!passThrough && newStreak < confirmFixes) {
+      if (!passThrough && !osCorroborated && newStreak < confirmFixes) {
         await tripRef.set(
           { playerId: userId, checkpointId, inside: false, insideStreak: newStreak },
           { merge: true }
@@ -767,6 +1016,58 @@ export const onLocationUpdate = functions
       // A normal entry latches inside=true; a pass-through latches as already-exited (the
       // player is already gone), so a later return is seen as a fresh crossing.
       const enteredInside = !passThrough;
+
+      /**
+       * Re-arrival cooldown (2026-09-06) — the backstop for what #82 hysteresis cannot
+       * reach.
+       *
+       * The hysteresis only guards a trip already latched `inside: true`. A pass-through
+       * deliberately latches `inside: false`, so it is exempt from both the hysteresis and
+       * the confirm-fixes streak, and the very next fix begins a fresh crossing. That loop
+       * produced 58 of Stonedam Day 2's 198 arrival docs — Payne recording The Crossroads
+       * six times in 2 m 41 s, Emma recording Stone Bench Beach twice 2.4 seconds apart.
+       *
+       * Positive step evidence can shorten the wait: a player whose counter has advanced
+       * far enough to have walked clear of the checkpoint and back has demonstrably moved,
+       * and holding them would suppress a real re-crossing. Absent step data the clock
+       * alone decides, and (as everywhere here) unknown means accept.
+       */
+      const lastArrivalMs =
+        (trip?.lastArrivalAt as admin.firestore.Timestamp | undefined)?.toMillis?.() ?? null;
+      if (reArrivalCooldownMs > 0 && lastArrivalMs != null && nowMs - lastArrivalMs < reArrivalCooldownMs) {
+        // Steps needed to have left the exit ring and come back — a genuine round trip.
+        const roundTripSteps =
+          (cp.radius * EXIT_HYSTERESIS_FACTOR * 2) / STEP_LENGTH_M;
+        const stepsSinceArrival =
+          typeof location.steps === 'number' && typeof trip?.lastArrivalSteps === 'number'
+            ? location.steps - trip.lastArrivalSteps
+            : null;
+        const walkedARoundTrip =
+          stepsSinceArrival != null && stepsSinceArrival >= roundTripSteps;
+
+        if (!walkedARoundTrip) {
+          functions.logger.info('[geofence] re-arrival suppressed by cooldown', {
+            gameId, userId, checkpointId, checkpointName: cp.name,
+            sinceLastArrivalMs: nowMs - lastArrivalMs,
+            passThrough, stepsSinceArrival,
+          });
+          // A normal entry still latches presence — the player really is inside, and the
+          // #67 re-evaluation and exit paths both need that latch. Only the duplicate
+          // arrival doc is withheld. A pass-through latches nothing: it claims the player
+          // has already gone, and we've just declined to believe the crossing.
+          if (enteredInside && !trip?.inside) {
+            await tripRef.set(
+              {
+                playerId: userId, checkpointId, inside: true, insideStreak: newStreak,
+                lastEnterAt: admin.firestore.FieldValue.serverTimestamp(),
+                lastTripCheckAt: admin.firestore.FieldValue.serverTimestamp(),
+              },
+              { merge: true }
+            );
+          }
+          continue;
+        }
+      }
 
       // One transaction: count the arrival ordinal, apply district suppression (#5), then
       // atomically latch presence + record the arrival. The per-entry effect firing (#67)
@@ -808,6 +1109,11 @@ export const onLocationUpdate = functions
         // Latch the arrival ordinal on first arrival so the re-evaluation path (#67) resolves
         // this player's fixed-order slot consistently.
         if (!alreadyArrived) latch.arrivalOrdinal = ordinal;
+        // Clock + odometer for the re-arrival cooldown (2026-09-06). Stamped only when an
+        // arrival doc is actually written, so a suppressed burst can't keep pushing the
+        // window forward and starve a genuine re-crossing later.
+        latch.lastArrivalAt = admin.firestore.FieldValue.serverTimestamp();
+        latch.lastArrivalSteps = typeof location.steps === 'number' ? location.steps : null;
         tx.set(tripRef, latch, { merge: true });
 
         tx.set(arrivalsCol.doc(), {
@@ -816,6 +1122,18 @@ export const onLocationUpdate = functions
           checkpointId,
           checkpointName: cp.name,
           timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          // How this crossing was established, and how far the recorded fix sat from the
+          // checkpoint (2026-09-06). `latitude`/`longitude` below stay the *actual* fix —
+          // never a fabricated point at the checkpoint — so these two fields are what let
+          // a post-mortem tell "stood in the circle" from "a line was drawn through it".
+          //
+          // Reconstructing that distinction by hand is exactly what the Stonedam Day 2
+          // analysis had to do, and it is why 44 arrivals "recorded outside the radius"
+          // was ambiguous for as long as it was: a pass-through is *supposed* to record a
+          // position outside the circle. Without this flag the healthy case and the
+          // receiver-drift case are the same row.
+          via: passThrough ? 'pass-through' : osCorroborated ? 'os-geofence' : 'fix',
+          fixDistanceM: Math.round(dist),
           latitude: location.latitude,
           longitude: location.longitude,
           ...(alreadyArrived ? { revisit: true } : {}),

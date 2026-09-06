@@ -540,9 +540,11 @@ export interface TrackingOptions {
   batterySaver?: boolean;
   /**
    * #82: hold a partial CPU wake lock for the duration of tracking (Android only).
-   * Gated by `GameConfig.wakeLockEnabled` so it can be A/B'd across players in a single
-   * walk — the one capture-layer variable in this build, deliberately isolated so the
-   * measurement isn't confounded. Costs battery; that's the trade being measured.
+   * Gated by `GameConfig.wakeLockEnabled`, which defaults **on** as of 2026-09-06.
+   *
+   * It was the isolated A/B variable through the 2026-09-05 build. Stonedam Day 2 then
+   * ran with it off for all eleven players and spent the game fighting deep-idle fixes,
+   * which settled the question: the battery cost is the cheaper side of the trade.
    */
   wakeLock?: boolean;
 }
@@ -616,15 +618,28 @@ export async function startLocationTracking(
   // checkpoint — i.e. fixes were landing just outside the circle and the crossing only
   // registered via #49 segment detection. BestForNavigation keeps the GPS hot instead of
   // letting the fused provider fall back to network positioning, which is what produces
-  // those 40-50m fixes. It costs battery, so batterySaver still uses Balanced.
+  // those 40-50m fixes. It costs battery, so batterySaver settles for High.
+  //
+  // **Battery saver moved Balanced → High on 2026-09-06.** Balanced is explicitly the
+  // ~100 m tier: it lets the fused provider serve Wi-Fi/cell trilateration instead of
+  // waking the receiver. Stonedam Day 2 ran the whole game on `batterySaver: true` and the
+  // signature is unmistakable — `provider: 'fused'` throughout, live fixes rejected at
+  // 156 m, 792 m, 107 m and 124 m, and a median arrival landing 17 m from centre at a 20 m
+  // radius. A fix that coarse cannot answer the only question the game asks of it, so
+  // saving battery to produce it saves nothing. High still uses GNSS (~10 m tier); the
+  // saving now comes from asking less often, below, which is the honest lever.
   const accuracy = options.batterySaver
-    ? Location.Accuracy.Balanced
+    ? Location.Accuracy.High
     : Location.Accuracy.BestForNavigation;
   // 3s requested (was 5s). Observed cadence has been ~15s with ~90s gaps once the device
   // idles, so the request is NOT currently the binding constraint — Android is coalescing.
   // Asking for less can only help, but the real fix for the gaps is elsewhere; measure
   // before assuming this changed anything.
-  const timeInterval = options.batterySaver ? 15000 : 3000;
+  //
+  // Battery saver widened 15s → 20s to pay for the accuracy tier above: fewer, better
+  // fixes rather than more, useless ones. Still well inside the server's #49 segment
+  // window, so a crossing between two fixes is still caught.
+  const timeInterval = options.batterySaver ? 20000 : 3000;
   // Never let the OS batch/defer updates: deferred delivery is exactly the "player stands
   // still and stops reporting" failure we keep hitting. Explicit rather than relying on
   // the library default staying 0.

@@ -17,10 +17,16 @@ import { acquireWakeLock, isWakeLockHeld, releaseWakeLock } from '@/modules/outd
  * largest effect in the dataset, and it degrades the step sensor's delivery at the same
  * time — one root cause, two symptoms.
  *
- * **This is the one capture-layer change in this build.** Keep it that way: anything else
- * that touches the location request would confound the measurement. It's gated by
- * `GameConfig.wakeLockEnabled` so it can be A/B'd across players within a single walk,
- * which is a far cleaner comparison than two walks on different days.
+ * **Default on since 2026-09-06** (`GameConfig.wakeLockEnabled`), promoted from the
+ * isolated A/B variable it was in the previous build. Stonedam Day 2 ran three and a half
+ * hours with it off for every player — all eleven surviving location docs read
+ * `wakeLock: false` — and produced 44 arrivals out of 198 recorded from outside the
+ * checkpoint radius, with fixes still being rejected at 156 m and 792 m accuracy in the
+ * closing minutes. Deep idle degrades the GPS fix and the step sensor together, so this
+ * is now load-bearing for the pedometer corroboration in `functions/src/geofence.ts` as
+ * well as for accuracy.
+ *
+ * Still costs battery, and a GM running an unusually long game can turn it off.
  *
  * iOS is a deliberate no-op — there's no user-acquirable CPU wake lock, and the
  * `location` background mode already keeps the app scheduled.

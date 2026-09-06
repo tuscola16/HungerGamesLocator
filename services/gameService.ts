@@ -259,7 +259,23 @@ export async function setGameMedia(
   });
 }
 
-/** Update the play-area boundary, rules text, event date, and/or per-GM config during setup. */
+/**
+ * Update the play-area boundary, rules text, event date, and/or per-GM config during setup.
+ *
+ * `config` is a **partial merge**, as its type has always claimed. It has to be written as
+ * dot-notation field paths to actually behave that way: `updateDoc` replaces a nested map
+ * wholesale, so passing `{ config: {...} }` deletes every key the caller left out.
+ *
+ * That was silently destructive (fixed 2026-09-06). Both Game-settings forms build a config
+ * literal from their own form fields, so every save was wiping the knobs neither form
+ * exposes — `autoEndThreshold` (#56), `wakeLockEnabled`, `locationTrail`,
+ * `maxDisplayAccuracyMeters`, `minFixAccuracyMeters`, `geofenceConfirmFixes`, the whole
+ * #100 geofence-quality set, and `tripIntervalMinutes` from the mobile form. Mostly
+ * invisible until now because an absent key resolves to its `BASE_GAME_CONFIG` default, so
+ * a wipe only showed up when a GM had *deliberately* changed something: a long game with
+ * the wake lock turned off, or a trail turned off for retention, would quietly get both
+ * back the next time anyone opened settings and hit Save.
+ */
 export async function updateGameConfig(
   gameId: string,
   updates: {
@@ -270,7 +286,12 @@ export async function updateGameConfig(
     gameDate?: FsTimestamp | null;
   }
 ): Promise<void> {
-  await updateDoc(doc(db, Collections.GAMES, gameId), updates);
+  const { config, ...topLevel } = updates;
+  const patch: Record<string, unknown> = { ...topLevel };
+  for (const [key, value] of Object.entries(config ?? {})) {
+    if (value !== undefined) patch[`config.${key}`] = value;
+  }
+  await updateDoc(doc(db, Collections.GAMES, gameId), patch);
 }
 
 /**

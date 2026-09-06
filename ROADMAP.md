@@ -292,6 +292,123 @@ plain "reached <checkpoint>" arrivals, burying the pushes that actually needed a
 
 ---
 
+**100. Geofence quality — Stonedam Day 2 (2026-09-06).** The first run with enough arrivals to
+measure the crossing logic statistically: 198 arrivals, 98 `checkpointTrips`, 10 players, 25
+checkpoints all at a 20 m radius, over 3 h of play. Pulled live from Firestore near the end of the
+game; `locationTrail` was **off**, so gap lengths are still unmeasured.
+
+*What the data said.*
+
+- **22% of arrivals (44/198) were recorded from outside the checkpoint radius**, nine of them
+  >100 m out, worst 295 m (Payne / The Old Dam), then 245 m and 210 m (snowmobile access point)
+  and 198 m (Stone Bench Beach). Cause: #49 pass-through with `MAX_SEGMENT_METERS = 400`. A 400 m
+  line drawn between two consecutive fixes sweeps a corridor across most of an arena this size and
+  clips a 20 m circle almost by construction.
+- **The median arrival landed 17 m from centre at a 20 m radius** — crossings were being confirmed
+  by fixes sitting on the rim, not in the circle. The flat 100 m `minFixAccuracyMeters` gate let a
+  99 m fix vote on a 20 m question.
+- **29% of arrival docs (58/198) were repeats within five minutes** of the previous one at the same
+  checkpoint. Payne recorded The Crossroads **six times in 2 m 41 s** at 9 → 72 → 55 → 113 → 109 →
+  16 m; Emma recorded Stone Bench Beach twice **2.4 s apart**. #82's exit hysteresis cannot reach
+  this: it only guards a trip already latched `inside: true`, and a pass-through deliberately
+  latches `inside: false`, so it is exempt from both the hysteresis *and* the `geofenceConfirmFixes`
+  streak, and the next fix starts a fresh crossing.
+- **Two checkpoint pairs overlapped**: Bathrooms ↔ The Docks and South Beach Start Third Arrival ↔
+  Stone Bench Beach, both **32 m apart with 20 m radii**. Emma sat between the first pair and
+  generated **15 arrival docs in 13 minutes**. Nothing in the editor warned about it.
+- **`batterySaver: true` was the whole game's accuracy story.** It selected
+  `Location.Accuracy.Balanced` — explicitly the ~100 m tier, which lets the fused provider serve
+  Wi-Fi/cell trilateration instead of waking the receiver. `provider: 'fused'` throughout, and
+  `onLocationUpdate` was still rejecting live fixes at 156 m / 792 m / 107 m / 124 m in the closing
+  minutes. `wakeLockEnabled` was unset, so all eleven surviving location docs read `wakeLock: false`.
+- **App Check has never worked in the field.** Every `submitRation` call logged *"Decoding App Check
+  token failed"* with `{"app":"INVALID"}`. `__DEV__` is false in a `preview` EAS build, so
+  sideloaded APKs were selecting `playIntegrity`, which cannot return a verdict for an app the Play
+  Store didn't install. Harmless only because enforcement is off — turning it on would have been a
+  total mid-game outage for every player.
+
+> **Built (2026-09-06) — the crossing logic, the capture layer, and the accelerometer retry:**
+> - **Per-checkpoint accuracy gate.** `GameConfig.accuracyRadiusFactor` (default 2) requires a fix's
+>   accuracy to be better than `radius × factor`, clamped between `MIN_ACCURACY_FLOOR_M` (25 m, so a
+>   small checkpoint can't demand the impossible and fall silent) and the flat
+>   `minFixAccuracyMeters` ceiling. A too-coarse fix `continue`s **without touching the trip** — an
+>   unreadable fix is not evidence of leaving, so it must not reset a streak or trip the exit path.
+> - **Tiered pass-through cap.** `passThroughMaxSegmentMeters` (default 150) is what the geometry is
+>   believed on *alone*; between that and `CORROBORATED_MAX_SEGMENT_METERS` (400) a crossing is
+>   admitted **only on positive step evidence**. A flat cap was tried first and rejected on the
+>   replay: it withdrew two crossings that were each a player's only arrival at that checkpoint, one
+>   of which (Gus, snowmobile access point, 245 m) delivered a real runbook hint. Whether that walk
+>   happened is a question for the pedometer, not a length threshold.
+> - **Step corroboration — the accelerometer retry** (`GameConfig.stepCorroboration`, default on).
+>   A pass-through asserts the player *walked* `segLen` metres; the hardware counter runs on a
+>   coprocessor through Doze, so it can be asked. Three things separate this from the motion gate
+>   deleted on 2026-09-05: it compares readings at least **`STEP_LOOKBACK_MS` (45 s)** apart rather
+>   than adjacent fixes 3–15 s apart (where Android's batching genuinely reads 0 mid-walk — the bug
+>   that cost 556 m and 980 m of real movement); it runs against the **polled hardware counter**,
+>   not the `watchStepCount` listener that reported 2 steps for a phone locked 16 minutes; and it
+>   may only veto an **inferred** crossing no fix witnessed, never a real fix or a player's map
+>   position. That last one is the load-bearing distinction — the counter under-reports and never
+>   over-reports, so only its positive direction is trustworthy. `common/locationStabilizer.ts`
+>   keeps its ban on reading `steps`, and now says why the ban is narrower than it looks.
+> - **Re-arrival cooldown.** `reArrivalCooldownMinutes` (default 5) is the backstop hysteresis
+>   structurally can't be. A normal entry inside the window still latches presence (the player
+>   really is inside; #67 re-eval and the exit path need it) and only withholds the duplicate
+>   arrival doc; a pass-through latches nothing. `CheckpointTrip.lastArrivalAt` advances **only when
+>   an arrival is actually written**, so a suppressed burst can't keep pushing the window forward.
+>   `lastArrivalSteps` lets positive step evidence admit a genuine round trip early.
+> - **OS geofence promoted out of shadow mode** (`trustOsGeofence`, default on). An OS Enter event
+>   for a checkpoint now satisfies `geofenceConfirmFixes` on its own and relaxes that checkpoint's
+>   accuracy gate to the flat ceiling — it is a second independent witness from the platform's
+>   low-power stack, which keeps working when our own cadence has collapsed. It deliberately does
+>   **not** create an arrival by itself: the OS watches an inflated circle (`radius × 1.5`, min
+>   `+25 m`), so believing the event alone would move every checkpoint's effective radius outward.
+>   The position still has to be in-radius; only the debounce is skipped.
+> - **Arrival provenance.** `Arrival.via` (`'fix'` | `'pass-through'` | `'os-geofence'`) and
+>   `.fixDistanceM`. `latitude`/`longitude` stay the *actual* fix, never fabricated at the
+>   checkpoint — these two fields are what separate "stood in the circle" from "a line was drawn
+>   through it", which this post-mortem had to reconstruct by hand.
+> - **Capture layer.** `wakeLockEnabled` and `locationTrail` both default **on**; `batterySaver`
+>   moved `Balanced → High` (still GNSS, ~10 m tier) and 15 s → 20 s, so the saving comes from
+>   asking less often rather than from accepting fixes too coarse to answer the question.
+> - **Too-close checkpoints.** `findCloseCheckpoints()` in `common/geo.ts` (shared by both GM
+>   surfaces) flags pairs whose rims come within `CHECKPOINT_MIN_GAP_M` (20 m), surfaced as a named
+>   Start-Game preflight **warning**, not a blocker — stacking two objectives on one landmark is a
+>   legitimate design, it just shouldn't happen by accident.
+> - **App Check provider by channel.** `production` attests for real; anything else uses `debug`
+>   (register the device token under App Check → Manage debug tokens). Override with
+>   `EXPO_PUBLIC_APP_CHECK_PROVIDER=attest|debug|off`.
+
+**Outstanding under #100:**
+
+- **None of it is field-verified.** Typechecked and replayed against the Stonedam arrivals, not run
+  on a device. Replaying the tiered cap + cooldown over that game's 198 arrivals gives 143 arrivals
+  with **zero** player/checkpoint pairs losing their only crossing when steps confirm the long
+  walks, and 139 with two such losses when steps deny them — which is the intended behaviour in
+  both directions, but the pedometer's actual verdict on those two is unknown.
+- **`STEP_LENGTH_M` (0.75) and `MIN_STEP_FRACTION` (0.5) are conventions, not measurements.**
+  Re-derive from the next `locationTrail` capture, which now records `fixGapMs` and
+  `trustedStepsSincePrev` alongside `stepsSincePrev` for exactly this.
+- **Fix-gap length is still unmeasured.** The original question — how long does a player actually go
+  without a usable fix — needs a trail, and Stonedam ran without one. It is on by default now.
+- **Mixed builds confound everything.** That game ran `buildVersion` 11, 15 and 16 simultaneously.
+  Get everyone onto one build before drawing conclusions from the next capture.
+- **Role changes mid-game orphan player data.** Will and Joe hold `role: 'gm'` with player arrivals
+  and location docs, because they were promoted after crossing checkpoints. Harmless here, but it
+  means member role is not a safe filter for post-game analysis.
+- **The evidence deletes itself, and nearly did.** `cleanupOnGameEnd` recursively deletes
+  `locations`, `arrivals`, `checkpointTrips` and `entryTrips` the moment `status → ended`. Stonedam
+  ended at 18:25:31Z; every collection this analysis rests on was gone minutes later, and the only
+  surviving copy is the snapshot pulled at ~17:55Z (now in `field-data/2026-09-06-stonedam-day-2/`,
+  gitignored — real names and GPS tracks). Note the snapshot is therefore ~30 minutes short of the
+  full game, so the 198-arrival figures are a lower bound.
+  **`locationTrail` alone does not fix this**: it is excluded from cleanup, but the arrivals and
+  trip latches you need to interpret a trail against are not, so the next post-mortem loses them the
+  same way unless someone pulls within the window. Either exclude `arrivals`/`checkpointTrips` from
+  cleanup while a game is flagged for analysis, or have the cleanup function archive them first.
+  Decide before the next field test, because there is no recovering it afterwards.
+
+---
+
 ## Tier 12 — 2026-09-06 post-game review
 
 Sixteen items from two sources on the same day: **#84–#93** from the post-game review, **#94–#99**
@@ -339,7 +456,17 @@ phase between them.
 - **Move the unaccounted-player check to the *close* transition** (retired #6/#28): cleanup is
   exactly when you find out someone never came back.
 
-**85. Move per-player GM actions into a ⋯ menu.** Each roster row in
+**85. Move per-player GM actions into a ⋯ menu.**
+> **Built (2026-09-06), the roster list:** the icon strip is replaced by a single ⋯ button
+> opening a labelled action sheet (status & message, ack/stand-down SOS, district, promote/demote,
+> revive, eliminate, remove). Handlers are untouched, so every existing confirmation still guards
+> the destructive ones; the row now carries status only. **The district chip stays inline on
+> purpose** — it is the sole inline *display* of a district and is already labelled text, not one of
+> the unlabeled icons this item was about; it is offered in the sheet as well.
+>
+> **Still outstanding:** the same treatment on the player *detail* screen (85.2).
+
+Each roster row in
 `app/(app)/gm/[gameId]/players.tsx` carries up to six inline icon buttons — ack SOS, clear SOS,
 eliminate, revive, role toggle, remove — plus a district editor and a tap-through to the player
 detail screen. On a phone that is a row of unlabeled ~24 px targets with the destructive ones
@@ -416,7 +543,26 @@ happening; #88 provides the post-game standing ordered by survival time. What re
 residual case — a GM who genuinely promotes someone to help run the game still erases their run.
 Keep a durable record of it if and when that matters.
 
-**92. Join by QR code.** The GM reads a 6-character code aloud and every player types it
+**92. Join by QR code.**
+> **Built (2026-09-06), and simpler than planned:** `/join` now reads a `?code=` param
+> (`app/(app)/join.tsx` — prefilled, normalised, never auto-submitted, and it no longer steals
+> focus when it arrives from a link), and the **web dashboard renders the player code as a QR**
+> encoding `outdoorgm://join?code=…` — in the lobby panel and the Codes modal, on screen only.
+>
+> **The signed-out case is handled**, which is the common one: a scanned link lands inside the
+> `(app)` group, whose layout bounces an unauthenticated user to login and drops the query string.
+> `app/(app)/_layout.tsx` now stashes the code (`constants/storageKeys.ts`) before redirecting, and
+> the Join screen consumes it once. The QR renders only for a well-formed 6-character code, so the
+> lobby's `…` placeholder can never be encoded into something a scanner reads as real.
+>
+> **No in-app scanner is needed.** The phone camera resolves the deep link itself, so the
+> `expo-camera` scanning UI this item assumed can be skipped entirely.
+>
+> **Still outstanding: the QR on the GM *phone*.** Rendering one in React Native needs
+> `react-native-svg`, which this project does not have — and adding a native module to the iOS pod
+> configuration is exactly what the CLAUDE.md gotchas warn against. Needs its own decision.
+
+The GM reads a 6-character code aloud and every player types it
 (`app/(app)/join.tsx:38`). Show a QR on **the GM's phone and the web dashboard** — not printed, so
 the code isn't left lying around photographable — encoding an `outdoorgm://join?code=…` deep link.
 Scanning fills in **the code, and the display name from the scanner's profile if they have one
@@ -424,7 +570,11 @@ set**. **One code per game**, unchanged — no rotation. Scanning is cheap (`exp
 a dependency for ration capture, so no new native module and no new permission); the QR *renderer*
 for the GM side is a new pure-JS dependency.
 
-**93. Stop autofocusing the display-name field on Profile.** `autoFocus` on the name input
+**93. Stop autofocusing the display-name field on Profile.**
+> **Built (2026-09-06):** the `autoFocus` prop is gone from the display-name input; the
+> delete-account modal keeps its own, which is correct. Rides the next mobile build.
+
+`autoFocus` on the name input
 (`app/(app)/profile.tsx:86`) throws the keyboard up the moment Profile opens, covering the options
 below it. **Remove the autofocus and leave the layout alone** — no reordering.
 
@@ -432,7 +582,26 @@ below it. **Remove the autofocus and leave the layout alone** — no reordering.
 
 ### Emailed field feedback (same day)
 
-**94. The safety alert must survive death.** ***Do this first.*** When a player is marked out,
+**94. The safety alert must survive death.** ***Do this first.***
+> **Built (2026-09-06), the client half only:** the safety-alert button is extracted into one
+> `renderSosButton()` and rendered in the `out` branch of the play screen *and* on the lobby/waiting
+> screen, so it no longer disappears when a player is killed. The confirmation copy now says
+> "**last known** location" for an out player, because tracking still stops at death.
+>
+> **Also built (2026-09-06), not deployed:** the geofence now skips eliminated players
+> (`if (member.out) return;` in `functions/src/geofence.ts`), plus `out` on the cached member
+> projection. The guard sits with the GPS-quality gate, **after** the `locationTrail` write and the
+> boundary-exit alert rather than at the member lookup — so once dead players keep uploading, their
+> breadcrumbs still land and a dead player leaving the arena still raises the boundary alert, which
+> is a safety signal. Only checkpoint/runbook resolution is suppressed. This was already a latent hole — the offline write queue
+> (#4) can flush a fix captured *before* a death — and it is the hard prerequisite for letting dead
+> players keep uploading. The 15 s member cache means a crossing in the seconds right after an
+> elimination can still slip through, the same window the boundary latch already accepts.
+>
+> **Still outstanding:** deploy that function; lift the `!out` tracking gate on the client; widen
+> the alert fan-out to every dead player. The `results`-phase copy question below is also still open.
+
+When a player is marked out,
 `app/(app)/player/game.tsx:710` swaps the whole action bar — the "I've been killed" button **and
 the safety-alert button together** — for a static card. The requirement is simply that **the option
 never goes away**: a dead player is exactly who is alone, cold and walking out of an arena in the
@@ -450,7 +619,18 @@ endgame, cleanup, results.
   control is still *visible* there, its copy has to say so rather than implying a GM is listening —
   the one loose end in this item.
 
-**95. Show new map drops as new.** Discovering a drop already notifies ("you discovered X") when a
+**95. Show new map drops as new.**
+> **Built (2026-09-06):** `RevealedMarkerPin` takes an `isNew` flag — primary-coloured ring plus a
+> badge dot — driven by a per-game "seen" set in AsyncStorage on the player screen. Until-seen, and
+> "seen" advances only while the map tab is actually up, after a 5 s dwell so a marker that lands
+> under the player's eyes still reads as new. The record also stamps a `since` time on this
+> device's first open of the game, and anything revealed before it is never "new" — otherwise every
+> always-shown checkpoint would light up at once on the screen a player uses to get their bearings.
+> Fail-soft: while the state is loading, or if storage
+> throws, nothing is flagged, which is exactly the pre-#95 behaviour. The pin's key carries `isNew`
+> so Android repaints it once `tracksViewChanges` has settled. Rides the next mobile build.
+
+Discovering a drop already notifies ("you discovered X") when a
 player trips a checkpoint or hazard — that part works. The gap is purely visual: **a checkpoint
 that has become visible since the player last had the map on screen should look different from one
 they've already seen**. Newness is **until-seen**, never time-decayed, and "seen" means **the map
@@ -503,13 +683,24 @@ choose. The player picks *where* and *who is spared*; everything else is the GM'
 
 **98. Runbook filtering — and a mobile runbook view.** Two halves of unequal size.
 
-- **98a (small, web).** `RunbookScreen` lists every entry in two flat groups sorted by priority
+- **98a (small, web). Built 2026-09-06** — a `FilterBar` in the sidebar filters by checkpoint
+  (select), effect kind and trigger (toggle chips from the existing `KIND_ORDER`/`TRIGGER_ORDER`),
+  with an "N of M shown" line and Clear. All filtering happens inside the existing grouping
+  `useMemo`, so the groups, counts and empty states follow for free; not persisted, per 98.1.
+  Builds clean; **not yet exercised in a browser** — the Runbook screen is behind the GM login.
+  *Original note:* `RunbookScreen` lists every entry in two flat groups sorted by priority
   ([web/src/screens/RunbookScreen.tsx:61](web/src/screens/RunbookScreen.tsx:61)), which stops
   scaling at a dozen checkpoints with two or three entries each. Filter **by checkpoint** and **by
   kind** — effect (`hazard`/`boon`/`notify`/`gm-notify`) and trigger
   (`fixed-order`/`always-on`/`timed`/`gm-prompted`) — plus targeted-only, reveals-on-fire, and
   (after #96) "needs players". **Filters do not persist between sessions.**
-- **98b (not small, mobile).** The mobile GM has **no runbook screen at all** — `app/(app)/gm/
+- **98b (mobile). Built 2026-09-06** — new read-only screen `app/(app)/gm/[gameId]/runbook.tsx`,
+  reached from a book icon in the GM header. Entries sorted highest-priority-first (the order a
+  crossing resolves in), each showing effect kind, checkpoint, trigger, timed window, targeting and
+  reveal, with horizontally scrolling filter chips for site / kind / trigger. Purely additive: it
+  reads `runbookEntries` + `checkpoints` straight off `GameContext` — which already exposed both —
+  and writes nothing, so no existing screen is touched. Authoring stays on web.
+  *Original note:* The mobile GM had **no runbook screen at all** — `app/(app)/gm/
   [gameId]/` has checkpoints, run-sheet, players, rations and the map, and nothing else. So "the
   same on mobile" means **building a runbook view**, read-and-filter, from scratch. Justified by
   the 1–2 GMs working from phones in the field, but it is its own piece of work and shouldn't be

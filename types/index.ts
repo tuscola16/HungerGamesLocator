@@ -177,17 +177,23 @@ export interface GameConfig {
   batterySaver: boolean;
 
   /**
-   * #82: hold a partial CPU wake lock while tracking (Android only). Default **off**.
+   * #82: hold a partial CPU wake lock while tracking (Android only). Default **on**
+   * since 2026-09-06.
    *
    * A foreground service does not keep the CPU awake and `expo-location` holds no lock of
    * its own, so between callbacks the device suspends and the OS coalesces our updates —
    * measured 2026-09-05 as a 3 s request delivered at a 14–18 s median with ~90 s gaps,
    * and a locked phone's median accuracy at 38 m against 13 m for one kept awake.
    *
-   * This is the **one capture-layer variable** under test; leave everything else in the
-   * location request alone while measuring it, or the result is uninterpretable. Costs
-   * battery — that's the trade being quantified. Flip it on for a subset of players to
-   * get both A/B arms out of a single walk.
+   * **Promoted from A/B variable to default by the Stonedam Day 2 run (2026-09-06).**
+   * That game shipped with this off for everyone, and every one of the eleven surviving
+   * location docs read `wakeLock: false`. The result: 22% of arrivals (44/198) were
+   * recorded from outside the checkpoint radius, and `onLocationUpdate` was still
+   * rejecting live fixes at 156 m, 792 m, 107 m and 124 m accuracy in the closing
+   * minutes. Deep idle is the common cause of the bad fixes *and* of the step sensor
+   * going quiet, so leaving it off costs both instruments at once.
+   *
+   * Still costs battery; a GM who needs a very long game can turn it off explicitly.
    */
   wakeLockEnabled?: boolean;
 
@@ -215,8 +221,32 @@ export interface GameConfig {
    * field-measured 2026-08-15, a stationary Pixel 8 reported 22 m accuracy while being
    * ~64 m from its true position, so it sailed through a 100 m gate while being wrong.
    * Raising this further will not help that case; see `locationTrail`.
+   *
+   * This is the **ceiling**, not the whole gate: `accuracyRadiusFactor` narrows it per
+   * checkpoint, so a 20 m checkpoint is judged far more strictly than this flat number.
    */
   minFixAccuracyMeters?: number;
+
+  /**
+   * Per-checkpoint accuracy gate (2026-09-06). A fix may only be evaluated against a
+   * given checkpoint when its reported accuracy is better than
+   * `radius × accuracyRadiusFactor`, subject to the `minFixAccuracyMeters` ceiling and
+   * the `MIN_ACCURACY_FLOOR_M` floor in `functions/src/geofence.ts`. Default 2; 0
+   * disables and falls back to the flat `minFixAccuracyMeters` gate alone.
+   *
+   * The flat 100 m gate was always acknowledged as a stopgap ("deliberately blunt: a fix
+   * accurate to only 100 m can trigger a smaller checkpoint from outside it"). The
+   * Stonedam Day 2 run priced that bluntness: with every checkpoint at a 20 m radius, a
+   * 99 m fix cleared the gate and was then asked whether it was within 20 m of a point —
+   * a question its own error bar cannot answer. The median arrival landed **17 m from
+   * centre at a 20 m radius**, i.e. crossings were being confirmed by fixes sitting on
+   * the rim, and 44 of 198 arrivals were recorded from outside the circle entirely.
+   *
+   * At the default a 20 m checkpoint demands 40 m accuracy — still generous enough for a
+   * pocketed phone's good fixes, and strict enough that the trilaterated ones stop
+   * voting.
+   */
+  accuracyRadiusFactor?: number;
 
   /**
    * Diagnostic breadcrumb trail (debugging only, opt-in, no UI to set it).
@@ -230,8 +260,13 @@ export interface GameConfig {
    *
    * Deliberately excluded from the game-end cleanup that purges `locations`/`arrivals`,
    * because the whole point is reading it after the game is over. That makes it a
-   * retention liability: only enable it on a throwaway test game, and delete the
-   * subcollection once you've analysed the run.
+   * retention liability: delete the subcollection once you've analysed the run.
+   *
+   * **Default on since 2026-09-06.** It was opt-in and therefore off for Stonedam Day 2,
+   * which is why that post-mortem could measure *where* arrivals landed but never *how
+   * long a player went without a usable fix* — the single most important number for
+   * tuning any of this. A trail that exists and is deleted beats one that was never
+   * written; four field tests in a row have now been diagnosed by inference.
    */
   locationTrail?: boolean;
   /**
@@ -239,6 +274,94 @@ export interface GameConfig {
    * Debounces a lone jumpy fix. Default 2.
    */
   geofenceConfirmFixes?: number;
+  /**
+   * Longest prev→curr segment (m) that #49 pass-through detection will believe **on its
+   * geometry alone**. Default 150; 0 disables pass-through detection entirely.
+   *
+   * Lowered from a hard-coded 400 m on 2026-09-06. At 400 m the test was manufacturing
+   * crossings out of GPS noise: Payne was credited with The Old Dam from a fix **295 m**
+   * from its centre, and with the snowmobile access point from **210 m** and **245 m**
+   * out. A segment that long between two consecutive fixes is not a walk, it is the
+   * receiver relocating — and the straight line drawn through it will sweep across half
+   * the arena, clipping every 20 m circle in its path.
+   *
+   * This is a floor, not a ceiling. With `stepCorroboration` on, a longer segment is still
+   * admitted up to `CORROBORATED_MAX_SEGMENT_METERS` (400 m) *when the pedometer confirms
+   * the player walked it* — because a flat cap answers the wrong question. Replaying
+   * Stonedam Day 2 against a flat 150 m showed it withdrawing two crossings that were each
+   * a player's only arrival at that checkpoint, one of which (Gus, snowmobile access
+   * point) delivered a real runbook hint. Whether that walk happened is a question for the
+   * step counter, not for a length threshold.
+   */
+  passThroughMaxSegmentMeters?: number;
+  /**
+   * Require pedometer evidence before believing a #49 pass-through. Default **on**
+   * (2026-09-06).
+   *
+   * A pass-through asserts the player walked a path between two fixes with no fix landing
+   * in the circle. That assertion is checkable: walking `segLen` metres takes roughly
+   * `segLen / STEP_LENGTH_M` steps, and the phone counts steps on a low-power
+   * coprocessor that keeps running through Doze. If the counter says the player barely
+   * moved while the coordinates say they covered 300 m, the coordinates are wrong.
+   *
+   * **This is a deliberate retry of an approach that was removed once.** The earlier
+   * step gate (see `common/locationStabilizer.ts`) failed for a reason that has since
+   * been fixed, and the distinction matters:
+   *
+   *  - It compared *adjacent* fixes 3–15 s apart, where Android's batched step delivery
+   *    genuinely reads 0 mid-walk (~70% of fixes did). Here the comparison runs against
+   *    the newest reading older than `STEP_LOOKBACK_MS`, which is long enough for a batch
+   *    to have flushed.
+   *  - It ran against the old `watchStepCount` listener, which does not fire while
+   *    backgrounded at all — a phone locked for 16 minutes reported **2 steps**. That was
+   *    replaced on 2026-09-05 by polling the hardware `TYPE_STEP_COUNTER` through the
+   *    native shim, and Stonedam Day 2 shows the rewrite working: 9,715 / 8,921 / 8,045
+   *    steps for a three-hour walk.
+   *  - Most importantly it was used to **veto movement** — to suppress a GPS fix because
+   *    steps looked low — which is unsound in the direction that matters, because the
+   *    step count under-reports and never over-reports. It cost two players 556 m and
+   *    980 m of genuine movement. Here the asymmetry is respected: steps may only veto an
+   *    *inferred* crossing that no fix ever witnessed, never a real fix, and never a
+   *    player's position on the map.
+   *
+   * Fails open in every unknown: no reading, a counter reset, a stale reading, or a
+   * player whose phone has no pedometer all mean "don't judge", never "hold".
+   */
+  stepCorroboration?: boolean;
+  /**
+   * Minutes before the same player can record another non-revisit arrival at the same
+   * checkpoint. Default 5; 0 disables.
+   *
+   * #82's exit hysteresis only guards a trip already latched `inside: true`. A #49
+   * pass-through never sets that — it latches `inside: false` on purpose, so the player
+   * is treated as already gone — which means every pass-through is exempt from both the
+   * hysteresis and the `geofenceConfirmFixes` debounce, and the next fix starts a fresh
+   * streak. Stonedam Day 2: **58 of 198 arrival docs (29%) landed within five minutes of
+   * the previous one at the same checkpoint.** Payne recorded The Crossroads six times in
+   * 2 m 41 s at 9 → 72 → 55 → 113 → 109 → 16 m; Emma recorded Stone Bench Beach twice
+   * **2.4 seconds apart**.
+   *
+   * This is the backstop that catches what hysteresis structurally cannot.
+   */
+  reArrivalCooldownMinutes?: number;
+  /**
+   * Trust the OS geofence's own Enter event as confirmation of a crossing, instead of
+   * only recording it. Default **on** (2026-09-06) — promotes #82 shadow mode.
+   *
+   * Android and iOS run geofencing in the platform's low-power location stack, which
+   * keeps working in Doze when our own fixes have collapsed to a ~90 s cadence. Shadow
+   * mode has been recording `geofenceEnter` beside our distance maths for two field
+   * tests; promoting it means an OS-corroborated fix satisfies `geofenceConfirmFixes` on
+   * its own and is judged against the flat `minFixAccuracyMeters` ceiling rather than the
+   * tighter per-checkpoint gate.
+   *
+   * What it deliberately does **not** do is create an arrival by itself. The OS watches
+   * an inflated circle (`radius × 1.5`, min `radius + 25`) so that its wake-up lands the
+   * player inside the true radius; believing the event alone would move every checkpoint's
+   * effective radius outward by 50%. The position still has to be in-radius — this only
+   * removes the *debounce*, which is the part that costs latency.
+   */
+  trustOsGeofence?: boolean;
   /**
    * @deprecated #83 — inert. This throttled the GM's *bare arrival* push on a re-crossing,
    * and bare arrivals no longer push at all. Kept so legacy game docs still typecheck.
@@ -273,10 +396,27 @@ export const BASE_GAME_CONFIG: GameConfig = {
   playerCountBroadcast: true,
   winnerDetection: true,
   batterySaver: true,
-  // #82: off by default — it's the variable under test, and it costs battery. Turn it on
-  // for a subset of players to get both A/B arms out of one walk.
-  wakeLockEnabled: false,
+  // #82: on by default since 2026-09-06. Stonedam Day 2 ran with this off for all eleven
+  // players and spent the game fighting deep-idle fixes; the battery cost is the cheaper
+  // side of that trade.
+  wakeLockEnabled: true,
   maxDisplayAccuracyMeters: 80,
+  // --- Geofence quality, all retuned from the Stonedam Day 2 post-mortem (2026-09-06) ---
+  // A 20 m checkpoint now demands 40 m accuracy rather than the flat 100 m ceiling.
+  accuracyRadiusFactor: 2,
+  // 400 m segments were inventing crossings out of receiver drift.
+  passThroughMaxSegmentMeters: 150,
+  // Ask the pedometer whether the player actually walked an inferred crossing.
+  stepCorroboration: true,
+  // Catches the repeat arrivals that #82 hysteresis structurally cannot (29% of that
+  // game's arrival docs).
+  reArrivalCooldownMinutes: 5,
+  // Promote #82 shadow mode: the OS geofence now confirms a crossing instead of only
+  // being recorded beside it.
+  trustOsGeofence: true,
+  // On by default: a trail that gets deleted after analysis beats a fifth field test
+  // diagnosed by inference.
+  locationTrail: true,
 };
 
 /**
@@ -317,6 +457,26 @@ export interface CheckpointTrip {
   /** #67: last time the runbook entries were re-evaluated for this player while inside,
    * gating the `tripIntervalMinutes` cadence. */
   lastTripCheckAt?: FsTimestamp | null;
+  /**
+   * When this player last had an arrival doc written for this checkpoint — the clock the
+   * `reArrivalCooldownMinutes` backstop runs on (2026-09-06).
+   *
+   * Distinct from `lastEnterAt`, which is also stamped by a pass-through that the
+   * cooldown *rejected*. This one advances only when an arrival was actually recorded, so
+   * a suppressed burst can't keep pushing the window forward and starve a genuine
+   * re-crossing that arrives later.
+   */
+  lastArrivalAt?: FsTimestamp | null;
+  /**
+   * Cumulative step count at the moment of the last recorded arrival (2026-09-06), or
+   * null when the pedometer had nothing to say.
+   *
+   * Lets a re-arrival be admitted *early* on positive evidence: a player whose counter
+   * has advanced far enough to have left and returned has demonstrably moved, so the
+   * cooldown need not hold them. Positive step evidence is the trustworthy direction —
+   * see `GameConfig.stepCorroboration`.
+   */
+  lastArrivalSteps?: number | null;
 }
 
 /**
@@ -622,11 +782,16 @@ export interface PlayerLocation {
    * Cumulative steps counted since this player's tracking session started (#82), or
    * absent when the pedometer is unavailable or the permission was declined.
    *
-   * **Recording only — nothing reads this for any gameplay decision.** It exists so a
-   * post-game `locationTrail` can answer the one question the trail otherwise can't:
-   * when a player's dot jumped, were they actually walking? Δsteps between two fixes
-   * bounds the displacement that was physically possible, which is what a future
-   * motion gate would be built on.
+   * Read on the server since 2026-09-06 by `GameConfig.stepCorroboration`, which uses it
+   * to decide whether a #49 pass-through describes a walk the player actually took. It
+   * remains a *corroborator*, never a position source and never a veto over a real fix:
+   * the counter under-reports (batched delivery, a phone in deep idle) and never
+   * over-reports, so only its positive direction is trustworthy.
+   *
+   * Counted on a low-power coprocessor that keeps running through Doze and app
+   * suspension, so it survives exactly the conditions that degrade GPS. Cumulative and
+   * monotonic within a tracking session; it resets to 0 when tracking restarts, which the
+   * server treats as "unknown" rather than "walked backwards".
    */
   steps?: number;
   /**
@@ -711,8 +876,26 @@ export interface Arrival {
   checkpointId: string;
   checkpointName: string;
   timestamp: FsTimestamp;
+  /** The player's actual reported position at the moment of the crossing — never
+   *  fabricated to sit at the checkpoint, so `fixDistanceM` can be non-zero. */
   latitude: number;
   longitude: number;
+  /**
+   * How the crossing was established (2026-09-06). Absent on arrivals written before that.
+   * - `'fix'`          — a reported position landed inside the radius (the healthy case).
+   * - `'pass-through'` — #49 inferred it from the path between two fixes, neither of which
+   *                      was inside. `fixDistanceM` is expected to exceed the radius here.
+   * - `'os-geofence'`  — an in-radius fix confirmed early by the platform's own geofence
+   *                      Enter event instead of by the `geofenceConfirmFixes` streak.
+   */
+  via?: 'fix' | 'pass-through' | 'os-geofence';
+  /**
+   * Metres from the recorded fix to the checkpoint centre. Written alongside `via` so a
+   * post-mortem can separate "stood in the circle" from "a line was drawn through it" —
+   * the distinction the Stonedam Day 2 analysis had to reconstruct by hand, and the reason
+   * "44 arrivals outside the radius" took so long to interpret.
+   */
+  fixDistanceM?: number;
 }
 
 /** GM→player one-way message. There is no player↔player channel (Rule 23). */

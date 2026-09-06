@@ -69,7 +69,7 @@ Shipped 2026-09-05. Additive and optional; legacy fixes without these fields rea
 |---|---|---|
 | `speed` | `number?` | Doppler ground speed m/s. **Correction (2026-09-05 field trail): absence is NOT the signal.** Android reports `0`, never null — zero missing values across 126 fixes. The value still correlates with bad fixes (every held candidate showed `speed 0`), so use the value, not its presence. |
 | `mocked` | `boolean?` | Android mock-provider flag; separates a developer-options mock from a genuine bad fix. |
-| `steps` | `number?` | Cumulative steps for the tracking session. **Recording only** — no gameplay decision reads it. |
+| `steps` | `number?` | Cumulative steps for the tracking session. Was recording-only; **read by the server since 2026-09-06** (§100 `stepCorroboration`) to corroborate a #49 pass-through. Still never a position source and never a veto over a real fix — the counter under-reports and never over-reports, so only its positive direction is trustworthy. |
 
 > **Write semantics.** `updatePlayerLocation` uses `setDoc` **without** `{merge:true}`, so an omitted
 > key is *deleted*, not preserved — the conditional-spread pattern does **not** carry a prior value
@@ -576,6 +576,55 @@ fact, not a bug.
 **Scale.** At 12 players the read cost peaks around six spectators watching six living players —
 negligible, and it was never the constraint.
 
+---
+
+## 100. Geofence quality — Stonedam Day 2 retune
+
+Shipped 2026-09-06. Additive and optional throughout; a legacy game doc with none of these keys
+gets the new defaults, and a game that explicitly set one keeps its value. See
+[ROADMAP.md](ROADMAP.md) §100 for the field data each default was derived from.
+
+**`GameConfig`** (`types/index.ts`) — five new knobs, plus two defaults flipped:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `accuracyRadiusFactor` | `number?` | `2` | Per-checkpoint accuracy gate: a fix may only be judged against a checkpoint when its accuracy beats `radius × factor`, clamped to `[MIN_ACCURACY_FLOOR_M, minFixAccuracyMeters]`. `0` disables, leaving only the flat ceiling. |
+| `passThroughMaxSegmentMeters` | `number?` | `150` | Longest #49 segment believed on geometry **alone**. `0` disables pass-through entirely. Not a hard ceiling — see `stepCorroboration`. |
+| `stepCorroboration` | `boolean?` | `true` | Check a pass-through against the pedometer. Also raises the segment ceiling to `CORROBORATED_MAX_SEGMENT_METERS` for crossings the step count positively confirms. |
+| `reArrivalCooldownMinutes` | `number?` | `5` | Minutes before the same player can record another arrival at the same checkpoint. `0` disables. |
+| `trustOsGeofence` | `boolean?` | `true` | An OS geofence Enter event satisfies `geofenceConfirmFixes` and relaxes that checkpoint's accuracy gate to the flat ceiling. Never creates an arrival on its own. |
+| `wakeLockEnabled` | `boolean?` | `true` *(was `false`)* | Promoted from A/B variable to default. |
+| `locationTrail` | `boolean?` | `true` *(was unset)* | Promoted from opt-in. **Still excluded from end-of-game cleanup** — the retention liability is unchanged, so delete the subcollection once a run is analysed. |
+
+**`CheckpointTrip`** (`types/index.ts`, server-written, never client-readable) — two new fields
+backing the cooldown:
+
+| Field | Type | Notes |
+|---|---|---|
+| `lastArrivalAt` | `FsTimestamp?` | Advances **only when an arrival doc is actually written** — deliberately not on every latched entry, so a suppressed burst can't keep pushing the window forward and starve a genuine later re-crossing. Distinct from `lastEnterAt`, which a rejected pass-through also stamps. |
+| `lastArrivalSteps` | `number?` | Cumulative step count at that arrival. Lets positive step evidence (a full round trip past the exit ring and back) admit a re-arrival before the clock expires. `null` when the pedometer had nothing to say. |
+
+**`Arrival`** (`types/index.ts`) — provenance, so a post-mortem stops being archaeology:
+
+| Field | Type | Notes |
+|---|---|---|
+| `via` | `'fix' \| 'pass-through' \| 'os-geofence'` `?` | How the crossing was established. Absent on pre-2026-09-06 arrivals. |
+| `fixDistanceM` | `number?` | Metres from the recorded fix to the checkpoint centre. `latitude`/`longitude` remain the **actual** fix and are never fabricated at the checkpoint, so a `pass-through` row is *expected* to exceed the radius — this pair is what separates that healthy case from receiver drift. |
+
+**`locationTrail/{id}`** (server-written, `functions/src/geofence.ts`) gains `fixGapMs` (from the
+server's own commit times, not the client clock) and `trustedStepsSincePrev` (the delta the crossing
+logic was willing to act on — `null` while the gap is under `STEP_LOOKBACK_MS`). Together with the
+existing `stepsSincePrev` these are what let `STEP_LENGTH_M` and `MIN_STEP_FRACTION` be re-derived
+from a capture instead of staying conventions.
+
+**No schema** — constants are module-level in `functions/src/geofence.ts`, deliberately not
+GM-tunable until a trail justifies values: `CORROBORATED_MAX_SEGMENT_METERS` 400,
+`STEP_LENGTH_M` 0.75, `MIN_STEP_FRACTION` 0.5, `STEP_LOOKBACK_MS` 45 s, `MIN_ACCURACY_FLOOR_M` 25 m.
+`CHECKPOINT_MIN_GAP_M` (20 m) lives in `common/geo.ts` beside `findCloseCheckpoints()`, which is
+pure and shared by both GM surfaces through the Start-Game preflight.
+
+---
+
 ## No schema change — enforcement / logic only
 
 These **outstanding** items are pure logic, rules, client architecture, or ops — no new fields or
@@ -583,7 +632,7 @@ collections. (Shipped no-schema items — 20–28, 48–56, 58's prerequisites, 
 [ROADMAP.md](ROADMAP.md) Built & removed callout and git history.)
 
 - **47** Maps-key restriction — Cloud Console ops task.
-- **85** GM per-player overflow menu — mobile UI only. **Every** action moves into the menu
+- **85** ◐ *Roster list built 2026-09-06; detail screen outstanding.* GM per-player overflow menu — mobile UI only. **Every** action moves into the menu
   (nothing stays inline), on the roster list *and* the player detail screen
   (`app/(app)/gm/[gameId]/players.tsx`, `.../player/`).
 - **86** Server-authoritative game logic — *a spike with a prototype*. Any outcome would be a large
@@ -596,12 +645,12 @@ collections. (Shipped no-schema items — 20–28, 48–56, 58's prerequisites, 
   notifications. The toll broadcast keeps its `targetPlayerId: null` fan-out unchanged — everyone
   else's toll still names them — and the dying player suppresses only their own, by its
   deterministic `{userId}_death` id (#26). No new field.
-- **92** Join by QR — a `code` route param on `/join` + an `outdoorgm://` deep-link handler; scanning
-  reuses the `expo-camera` dependency already present for ration capture. Adds a pure-JS QR *renderer*
+- **92** ◐ *Built 2026-09-06 (join deep-link param + web QR); mobile-phone QR blocked on the absent `react-native-svg` native module.* Join by QR — a `code` route param on `/join` + an `outdoorgm://` deep-link handler; scanning
+  turned out **not** to need the `expo-camera` scanner at all — the phone's own camera resolves the deep link. Adds a pure-JS QR *renderer*
   dependency for the GM side. No stored data and **no code rotation** — one code per game, unchanged.
   Displayed on the **GM phone and web dashboard only, never printed**, so the secret isn't left
   photographable. Scanning fills the code plus the scanner's own profile display name.
-- **93** Profile display-name autofocus — delete one prop (`app/(app)/profile.tsx:86`). Layout
+- **93** ✅ *Built 2026-09-06.* Profile display-name autofocus — deleted one prop (`app/(app)/profile.tsx:86`). Layout
   stays as it is; no reordering.
 - **94** Safety alert surviving death — client + functions, no new fields. Three parts: keep the
   control visible in **every** state (it is the requirement — the option must never disappear);
@@ -610,7 +659,7 @@ collections. (Shipped no-schema items — 20–28, 48–56, 58's prerequisites, 
   (`types/index.ts:555`, `services/gameService.ts:348`) — keep it as the no-fix fallback, since the
   alert must send regardless; and **widen the fan-out to GMs *and* every dead player** (never live
   ones), which is a recipient-list change in `functions/src/members.ts`. Paging stops at close.
-- **95** New-drop iconography — presentation plus a per-device "seen" set (AsyncStorage, the pattern
+- **95** ✅ *Built 2026-09-06.* New-drop iconography — presentation plus a per-device "seen" set (AsyncStorage, the pattern
   `AlertOverlay` uses for dismissed broadcasts). Settled: **until-seen, never time-decayed**, and
   "seen" means the **map was on screen**, not that the app was opened — so the seen-set is written
   by the map view, not by the screen mount. `RevealedMarker.revealedAt`/`visibleFrom` already carry
@@ -618,9 +667,9 @@ collections. (Shipped no-schema items — 20–28, 48–56, 58's prerequisites, 
   would mark a drop seen for everyone the first player looked at it. Discovery notifications already
   exist and are unchanged — this is purely the "visible since last look" styling. No GM-side view of
   who has seen what.
-- **98a** Web runbook filtering — `web/src/screens/RunbookScreen.tsx` UI only; every axis
+- **98a** ✅ *Built 2026-09-06.* Web runbook filtering — `web/src/screens/RunbookScreen.tsx` UI only; every axis
   (`checkpointId`, `effect.kind`, `trigger`, `playerIds`, `revealOnFire`) is already on the entry.
   Filters **do not persist** between sessions.
-- **98b** Mobile runbook view — **no schema, but not small**: `app/(app)/gm/[gameId]/` has no
+- **98b** ✅ *Built 2026-09-06.* Mobile runbook view — **no schema, but not small**: `app/(app)/gm/[gameId]/` has no
   runbook screen at all (checkpoints, run-sheet, players, rations, map). "The same on mobile" means
   building a read-and-filter view from scratch, justified by the 1–2 GMs working from phones.

@@ -35,10 +35,25 @@ import { distanceMeters } from './geo';
  *  - The **speed** gate still catches a teleport that also degrades in quality. It fired
  *    on only 2 of those 13 jumps, so it is a backstop, not the primary mechanism.
  *
- * A step-based motion gate was written and then removed before it ever shipped: replayed
- * against the trail it would have suppressed 556 m and 980 m of two players' genuine
- * movement, because Android batches step delivery (≈70% of fixes read `stepsSincePrev: 0`
- * mid-walk) and delivers nothing at all to a locked phone.
+ * A step-based motion gate was written and then removed *here* before it ever shipped:
+ * replayed against the trail it would have suppressed 556 m and 980 m of two players'
+ * genuine movement, because Android batches step delivery (≈70% of fixes read
+ * `stepsSincePrev: 0` mid-walk) and delivers nothing at all to a locked phone.
+ *
+ * **That verdict still stands for this file, and the ban is narrower than it looks.** The
+ * reason it failed was the direction of the inference: a step count under-reports and
+ * never over-reports, so a low reading is not evidence of stillness, and using it to
+ * suppress a *real fix* — a player's actual position on the map — is unsound. Nothing
+ * here should read `steps`.
+ *
+ * Steps are used on the server as of 2026-09-06 (`GameConfig.stepCorroboration`), and the
+ * two differences are what make that sound: it judges only an *inferred* #49 crossing that
+ * no fix ever witnessed, never a position; and it compares readings at least
+ * `STEP_LOOKBACK_MS` apart rather than adjacent fixes 3–15 s apart, which is what made the
+ * delta meaningless. The underlying counter was also rewritten on 2026-09-05 from the
+ * `watchStepCount` listener (a phone locked 16 minutes reported **2 steps**) to polling the
+ * hardware counter, and Stonedam Day 2 shows the rewrite working — 9,715 / 8,921 / 8,045
+ * steps across a three-hour walk.
  *
  * **Everything still errs toward accepting.** An unknown accuracy, a missing timestamp, or
  * a disabled threshold all mean "don't judge", never "hold", and `MAX_HOLD_MS` bounds the
