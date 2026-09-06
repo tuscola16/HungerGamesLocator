@@ -2358,9 +2358,18 @@ function RationsModal({
       {lightbox && (
         <div
           onClick={() => setLightbox(null)}
-          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)', display: 'grid', placeItems: 'center', zIndex: 60, cursor: 'zoom-out' }}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)', display: 'grid', placeItems: 'center', zIndex: 60, cursor: 'zoom-out', padding: 16 }}
         >
-          <img src={lightbox} style={{ maxWidth: '92%', maxHeight: '92%' }} />
+          {/* Size to the viewport, not the grid area: a percentage max-* here would resolve against
+              a content-sized track (cyclic), so browsers drop it and the photo renders full-res. */}
+          <img
+            src={lightbox}
+            alt="Ration card"
+            style={{
+              maxWidth: '92vw', maxHeight: '92vh', width: 'auto', height: 'auto',
+              objectFit: 'contain', display: 'block',
+            }}
+          />
         </div>
       )}
     </Modal>
