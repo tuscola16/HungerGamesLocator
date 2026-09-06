@@ -468,9 +468,9 @@ phase between them.
 > the Modal's `onDismiss`, which is **iOS-only**; Android has no such restriction and runs it
 > immediately, because it would otherwise wait for a callback that never fires.
 >
-> **The district chip stays inline on purpose** — it is the sole inline *display* of a district
-> and is already labelled text, not one of
-> the unlabeled icons this item was about; it is offered in the sheet as well.
+> **The district chip stays inline** (confirmed 2026-09-06) — it is the sole inline *display* of a
+> district and is already labelled text, not one of the unlabeled icons this item was about; it is
+> offered in the sheet as well.
 >
 > **Still outstanding:** the same treatment on the player *detail* screen (85.2).
 
@@ -560,7 +560,10 @@ Keep a durable record of it if and when that matters.
 > **The signed-out case is handled**, which is the common one: a scanned link lands inside the
 > `(app)` group, whose layout bounces an unauthenticated user to login and drops the query string.
 > `app/(app)/_layout.tsx` now stashes the code (`constants/storageKeys.ts`) before redirecting, and
-> the Join screen consumes it once. The QR renders only for a well-formed 6-character code, so the
+> the Join screen consumes it once. **Accepted as-is (2026-09-06):** a signed-in player scanning the
+> QR lands straight on a prefilled Join screen; a signed-out one signs in, arrives at My Games, and
+> finds the code already filled when they tap Join. Routing them straight through would mean
+> changing post-login navigation, which is not worth it for the second case. The QR renders only for a well-formed 6-character code, so the
 > lobby's `…` placeholder can never be encoded into something a scanner reads as real.
 >
 > **No in-app scanner is needed.** The phone camera resolves the deep link itself, so the
@@ -607,7 +610,7 @@ below it. **Remove the autofocus and leave the layout alone** — no reordering.
 > elimination can still slip through, the same window the boundary latch already accepts.
 >
 > **Still outstanding:** deploy that function; lift the `!out` tracking gate on the client; widen
-> the alert fan-out to every dead player. The `results`-phase copy question below is also still open.
+> the alert fan-out to every dead player.
 
 When a player is marked out,
 `app/(app)/player/game.tsx:710` swaps the whole action bar — the "I've been killed" button **and
@@ -623,9 +626,12 @@ endgame, cleanup, results.
   makes the dead the standing rescue crew: they have the boundary, every checkpoint and the alert.
 - **The alert itself doesn't change by who sent it** — dead or alive, it means the same thing:
   this person needs help.
-- **Paging stops when the game closes.** SOS does not summon anyone after `results`. Since the
-  control is still *visible* there, its copy has to say so rather than implying a GM is listening —
-  the one loose end in this item.
+- **The control stops at the end of the game** (settled 2026-09-06). It shows in the lobby and
+  through play, endgame and cleanup — including after a player has died, which is the point — but
+  **not in `results`**. Paging stops at close anyway, so a button that summoned nobody would be
+  worse than no button; once the game is over people go back to phoning the GM. This is what the
+  code already does: `renderSosButton()` is wired into `renderWaiting()` and both branches of
+  `renderPlay()`, and deliberately not into `renderResults()`.
 
 **95. Show new map drops as new.**
 > **Built (2026-09-06):** `RevealedMarkerPin` takes an `isNew` flag — primary-coloured ring plus a
