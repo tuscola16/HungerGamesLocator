@@ -31,6 +31,8 @@ always consult both:
 
 Companion context: [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) explains the prioritization.
 Keep the two roadmap files in sync — a roadmap item and its schema share one number.
+[GAME_IDEAS.md](GAME_IDEAS.md) is a separate idea log for **future games** (formats, traps,
+locations, physical staging) — a design scratchpad, not a build queue.
 
 ## Quick Commands
 
