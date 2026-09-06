@@ -10,8 +10,10 @@ store launch. Items are grouped by tier, roughly in build order. Numbers are **s
 reused**; a shipped item moves to the **Built & removed** callout below (one-line summary; full
 detail in git + the README) rather than being renumbered. The build-out **through Tier 7 plus all
 field-test findings has shipped** (see the callout) — the outstanding work is the open half of
-**#82** (location jitter, from the 2026-09-04 game) and **#83** (mobile GM feed), P3 polish
-(Tier 11 — **#57** per-GM teams), plus the deferred public-launch gating (#46/#47).
+**#82** (location jitter, from the 2026-09-04 game), **#83** (mobile GM feed) and the **Tier 12**
+post-game batch (**#84–#99**, requirements settled 2026-09-06 and sequenced cheap-first behind the
+**#94** safety defect), plus the deferred public-launch gating (#46/#47). Tier 11 is closed —
+**#57** per-GM teams is dropped.
 
 > **Built & removed** (retired numbers, never reused — one-line summaries; full detail in git
 > history + the [README](README.md#features)):
@@ -117,18 +119,18 @@ unconditionally and `minFixAccuracyMeters` gates only *checkpoint evaluation*, n
 
 **Outstanding under #82:**
 
-- **Render the confidence data.** `confidenceM` / `stale` / `held` reach both maps but nothing draws
-  them yet — no accuracy circle, no stale dimming. This is the half that makes the map *honest*
-  rather than merely calmer, and it's where we should deliberately **not** copy Strava: their live
-  Beacon view shows last-known-position and says so, but their recorded track is smoothed post-hoc
-  with future data, which a live GM map can never do.
+- ~~**Render the confidence data.**~~ **Dropped (2026-09-06.)** `confidenceM` / `stale` / `held`
+  reach both maps and nothing draws them — and after the GPS_PROVIDER fix the map is good enough
+  that accuracy circles and stale dimming are not worth the time. The fields stay (they cost
+  nothing and the data is still useful when reading a trail back); the UI is off the roadmap.
 - **Tune the gate from real data.** The 7 m/s and 60 s constants are guesses — loose on purpose,
   since a teleport detector that never false-fires beats a smoother we can't calibrate. Re-derive
   them from a `locationTrail` capture (walk a known route pocketed + locked, with a control
   recording in Strava on the same handset, plus a stationary segment where all movement is error).
-- **Fix the clock-skew in staleness.** `ageMs` subtracts a Firestore *server* timestamp from the
-  GM device's `Date.now()`, so a skewed GM clock marks everyone permanently stale or never stale.
-  Harmless until the staleness UI ships; must be fixed before it does.
+- **Clock-skew in staleness — parked with the UI above.** `ageMs` subtracts a Firestore *server*
+  timestamp from the GM device's `Date.now()`, so a skewed GM clock marks everyone permanently
+  stale or never stale. Harmless while nothing renders staleness, which is now the plan; fix it
+  only if that UI is ever revived.
 - **Capture-layer suspects, if the trail shows gaps rather than scatter.** A foreground service does
   *not* keep the CPU awake; `expo-location` has a known issue where updates batch to minutes after
   5–10 min of sleep; `foregroundServiceType="location"` on Android 14+; and OEM battery allowlists
@@ -243,9 +245,10 @@ unconditionally and `minFixAccuracyMeters` gates only *checkpoint evaluation*, n
   40–50 m" suggestion was based on fused-provider error and is **withdrawn**: widening now
   would only add false triggers, which in a hidden-trap game punish a player who was never
   there and cannot dispute it.
-- **Battery cost of continuous GPS is unmeasured.** The walk was 19 minutes; a real game is
-  3.5 hours with the receiver effectively always on in an arena this small. The rate limit
-  should bound it, but nobody has watched a battery curve yet. Measure before a full event.
+- **Battery cost of continuous GPS — being measured in the 2026-09-06 game.** The walk was 19
+  minutes; a real game is 3.5 hours with the receiver effectively always on in an arena this
+  small. The rate limit should bound it, but nobody has watched a battery curve yet. **Record the
+  result here afterwards** — it is the last open unknown in #82.
 - **`satellites` is device-dependent.** Per's handset reports 0 alongside good 18 m fixes
   (the OEM doesn't populate the legacy extra); Shannon's reports 7–17 properly. Treat 0 as
   unknown, never as "no satellites".
@@ -254,8 +257,9 @@ unconditionally and `minFixAccuracyMeters` gates only *checkpoint evaluation*, n
 - **Fix cadence is unchanged at 17–23 s (p90).** The 1–2 s medians in the third trail are an
   artifact of paired fused+gps writes, not an improvement. Nothing in this batch touched the
   location request, and the wake lock showed no effect on cadence in the second trail.
-- **`locationTrail` retention.** Three subcollections now, all excluded from end-of-game
-  cleanup by design. Delete them once the tuning work is done.
+- **`locationTrail` retention.** Three subcollections now, all excluded from end-of-game cleanup
+  by design. **Keep capture on for the 2026-09-06 game** (it pairs with the battery measurement),
+  then delete them.
 
 **83. GM push fired on every checkpoint crossing.** Reported 2026-09-05: the GM's phone buzzed for
 plain "reached <checkpoint>" arrivals, burying the pushes that actually needed a response.
@@ -277,25 +281,283 @@ plain "reached <checkpoint>" arrivals, burying the pushes that actually needed a
 
 **Outstanding under #83:**
 
-- **Mobile GM feed still lists every arrival.** `app/(app)/gm/[gameId]/index.tsx` renders
-  `<AlertFeed arrivals={arrivals} />` unsplit, and its unseen-alert badge counts `arrivals.length`,
-  so it now increments for crossings that never pushed. Mirror the web split when the mobile feed
-  next gets attention.
+- **Mobile GM feed still lists every arrival — and it is wanted.** `app/(app)/gm/[gameId]/index.tsx`
+  renders `<AlertFeed arrivals={arrivals} />` unsplit, and its unseen-alert badge counts
+  `arrivals.length`, so it increments for crossings that never pushed. Confirmed 2026-09-06 that
+  the mobile GM view is in active use at events (1–2 GMs on phones alongside one on web), so
+  mirror the web alerts/arrivals split rather than waiting for the mobile feed to get attention
+  for some other reason. Fold it in with **#87** (the GM firehose) — same problem, same surface.
 - **Not yet field-verified.** Confirming a bare crossing goes silent while a hazard still pushes
   needs a device inside a checkpoint radius; it has only been typechecked and reasoned through.
 
 ---
 
-## Tier 11 — P3 polish
+## Tier 12 — 2026-09-06 post-game review
+
+Sixteen items from two sources on the same day: **#84–#93** from the post-game review, **#94–#99**
+from player/GM emails. **Requirements were settled the same day**, so the entries below are written
+as decisions rather than options; the few genuinely open threads are called out as such.
+
+Deliberately **not sequenced against an event** — there is a game the same evening and nothing here
+lands by then. Two standing facts now shape the whole tier: **iOS is back in the loop**, so every
+mobile item is two platforms, not one; and the GM team runs **1–2 GMs on mobile plus one on web
+over a hotspot**, so the mobile GM surface is load-bearing and not a second-class view.
+
+**Build order — cheap first, then critical:**
+
+1. **#94** safety alert survives death — cheap *and* the only defect. Do it first.
+2. **#93** (one prop), **#95** (new-drop styling), **#85** (GM action menus), **#98a** (web runbook
+   filters) — small, independent, ride any build.
+3. **#89 + #99** — the "You died" screen, the countdown and the spectator map are one flow.
+4. **#84** cleanup phase, then **#88** living/post-game roster.
+5. **#90** soft delete, **#98b** (a mobile runbook view — see the note, this one is not small).
+6. **#96 → #97** player-armed traps: the largest item in the tier, and #96 gates it.
+7. **#87** GM notification mute, **#86** the platform spike, **#91** whatever is left of it.
+
+**84. `cleanup` phase — a state between "victor declared" and "game closed".** `endGame()`
+([services/gameService.ts:561](services/gameService.ts:561)) collapses two moments into one write:
+it sets `phase: 'results'` **and** `status: 'ended'`, so the instant a winner is declared, tracking
+stops, the map goes cold, and the recovery job — collecting every prop from every checkpoint, and
+accounting for every player and GM still in the woods — happens with no tooling at all. Insert a
+phase between them.
+
+- **New `GamePhase` value `'cleanup'`**, entered from `play`/`endgame`, exited to `results`.
+  Guarded + monotonic like the other transitions (retired #27). The GM can step **back** to `play`
+  if a victory was called wrong — wanted, but not critical-path.
+- **The winner is announced at victory**, on entering cleanup — not held to close.
+- **Everyone sees everyone.** Mutual player↔player and player↔GM map visibility for the whole
+  phase, and every checkpoint projected into the player-readable `markers` collection so people can
+  navigate to the drops they are recovering.
+- **Anyone marks a drop cleared**, not just whoever placed it — the person standing at the site is
+  the one who knows. The GM gets a running count and a clear **"every drop is cleared"** state, but
+  the phase only ever ends manually.
+- **Players are expected to help** if they are still around; nobody is pushed about it. People who
+  have already gone home get **no** "cleanup started" notification.
+- **Ration photos are deleted at victory**, not at close — so the photo purge moves *earlier*, onto
+  the cleanup transition, while the location/arrival purge stays at close where cleanup still needs
+  it. Those two live in the same function today and have to be split (see the schema).
+- **Move the unaccounted-player check to the *close* transition** (retired #6/#28): cleanup is
+  exactly when you find out someone never came back.
+
+**85. Move per-player GM actions into a ⋯ menu.** Each roster row in
+`app/(app)/gm/[gameId]/players.tsx` carries up to six inline icon buttons — ack SOS, clear SOS,
+eliminate, revive, role toggle, remove — plus a district editor and a tap-through to the player
+detail screen. On a phone that is a row of unlabeled ~24 px targets with the destructive ones
+sitting next to the routine ones. **Everything goes into the overflow menu — nothing stays inline**
+— with labelled rows so destructive entries are named. **Applies to the player detail screen too**,
+not just the list. Mobile only; the web roster keeps its inline buttons.
+
+**86. [Research] Move game logic out of the app shells.** *A real spike with a prototype, not a
+paper exercise.* Two drivers, and both were named: the cost of authoring every rule twice
+([services/gameService.ts](services/gameService.ts) at 987 lines against
+[web/src/services/gameService.ts](web/src/services/gameService.ts) at 771, with `common/` holding
+only five genuinely shared modules), **and** having to ship an app update — and chase everyone onto
+it — for what was only ever a messaging change.
+
+> **Evaluate re-enabling OTA updates first.** The second driver is the sharper one and it may not
+> need an architecture at all: `updates.enabled` was turned **off** deliberately (2026-06-19) after
+> the install-over crash loop, and turning it back on addresses "I just wanted a quick messaging
+> update" far more cheaply than server-driven UI. If OTA covers it, this item shrinks to the
+> code-duplication half. Answer that question before prototyping anything.
+
+The remaining question is whether the server can deliver a **generic, event-shaped state** — a
+phase, things to show, actions the caller may take, typed notifications — that the shells render
+without knowing what a hazard, a ration window or a district *is*. Weigh against what stays
+client-side regardless (location capture, permissions, camera, background tasks, maps) and against
+its real cost: the schema becomes an API contract with old binaries in the field.
+
+**87. Mute the GM notification firehose.** *The target is the **GM's** alert volume, not players'.*
+Preferences are **per user**, not per game — one setting that follows a GM across every game they
+run. **SOS is never mutable. Boundary-exit explicitly is** (it fires often enough to be noise, and
+that is the GM's call to make). No game-level policy: a GM cannot mute on anyone else's behalf.
+Because muting must work when the app is closed, the filter is server-side in the push path — which
+puts back a member-doc read that #83 deliberately removed, so it rides the existing member cache
+(#16).
+
+**88. The player roster — living during play, standings afterwards.** Players today can read only
+their own member doc ([firestore.rules:134](firestore.rules:134)), because member docs carry emails
+and FCM tokens. Give them a list — **names only**, no contact details, no locations — available in
+**every phase**, showing:
+
+- **during play: living players only** (a dead player leaves the list rather than being shown as
+  dead, so it never becomes a scoreboard of who to hunt);
+- **after the game: everyone who played, ordered by who lasted longest** — which is the results
+  standing, and is most of what #91 was for.
+
+No GM roster, in either mode. Needs a projection rather than a relaxed rule, since the sensitive
+fields share the document.
+
+**89. The "You died" screen.** When a player is out,
+`app/(app)/player/game.tsx:710` swaps the action bar for a muted grey "You're out" card — the map,
+tabs and chrome are otherwise identical to being alive. Worse, the death toll is written to **all**
+players (`targetPlayerId: null`, [functions/src/members.ts:79](functions/src/members.ts:79)), so
+`AlertOverlay` pops the toll — "*Alex has fallen — 3 tributes remain*" — in Alex's own face. (The
+*push* already excludes them: `livingTokens` filters on `!out`. So this is the in-app overlay only,
+and the deterministic `{userId}_death` id makes suppressing your own a one-liner.)
+
+- A **full-screen "You died"** that **blocks interaction until dismissed**, replacing the generic
+  toll for that player. **Same screen regardless of cause** — self-reported, GM elimination or
+  starvation all read the same.
+- **Everyone else's toll still names them**, unchanged.
+- Behind it: **nothing but the spectator map** (#99). No stats, no extra chrome. They **do** keep
+  receiving the death notifications for other players.
+
+**90. Delete a finished game, with an undo.** `deleteGame` already does a real `recursiveDelete`
+([functions/src/games.ts:406](functions/src/games.ts:406)) but refuses anything that has started; a
+finished game can only be *archived*, which is a per-member flag hiding it from one person's list
+while every document survives forever. **Any GM** of the game can delete it — not just the creator —
+and there is **no age requirement**. It is a **soft delete with a 20-minute recovery window**: the
+game disappears immediately for everyone, a GM can undo it within 20 minutes, and a sweep hard-
+deletes it after that. The confirmation **must say that other members lose their history too**.
+
+**91. Whatever is left of "was a player".** *Later tier, and now nearly empty.* #99 gives dead
+players the spectator map **as players**, so the promotion that used to erase someone's run stops
+happening; #88 provides the post-game standing ordered by survival time. What remains is only the
+residual case — a GM who genuinely promotes someone to help run the game still erases their run.
+Keep a durable record of it if and when that matters.
+
+**92. Join by QR code.** The GM reads a 6-character code aloud and every player types it
+(`app/(app)/join.tsx:38`). Show a QR on **the GM's phone and the web dashboard** — not printed, so
+the code isn't left lying around photographable — encoding an `outdoorgm://join?code=…` deep link.
+Scanning fills in **the code, and the display name from the scanner's profile if they have one
+set**. **One code per game**, unchanged — no rotation. Scanning is cheap (`expo-camera` is already
+a dependency for ration capture, so no new native module and no new permission); the QR *renderer*
+for the GM side is a new pure-JS dependency.
+
+**93. Stop autofocusing the display-name field on Profile.** `autoFocus` on the name input
+(`app/(app)/profile.tsx:86`) throws the keyboard up the moment Profile opens, covering the options
+below it. **Remove the autofocus and leave the layout alone** — no reordering.
+
+---
+
+### Emailed field feedback (same day)
+
+**94. The safety alert must survive death.** ***Do this first.*** When a player is marked out,
+`app/(app)/player/game.tsx:710` swaps the whole action bar — the "I've been killed" button **and
+the safety-alert button together** — for a static card. The requirement is simply that **the option
+never goes away**: a dead player is exactly who is alone, cold and walking out of an arena in the
+dark, and they must still be able to call for help. It shows in **every state** — out, eliminated,
+endgame, cleanup, results.
+
+- **A dead player keeps uploading their location** (the tracking-stops-on-death rule is lifted; see
+  #99), so an SOS is backed by a live position rather than a stale one. If a fix can't be had, the
+  alert **still goes out**, flagged as having no fix — a safety alert is never blocked on GPS.
+- **It reaches GMs *and* every dead player — never living players.** Together with #99's map this
+  makes the dead the standing rescue crew: they have the boundary, every checkpoint and the alert.
+- **The alert itself doesn't change by who sent it** — dead or alive, it means the same thing:
+  this person needs help.
+- **Paging stops when the game closes.** SOS does not summon anyone after `results`. Since the
+  control is still *visible* there, its copy has to say so rather than implying a GM is listening —
+  the one loose end in this item.
+
+**95. Show new map drops as new.** Discovering a drop already notifies ("you discovered X") when a
+player trips a checkpoint or hazard — that part works. The gap is purely visual: **a checkpoint
+that has become visible since the player last had the map on screen should look different from one
+they've already seen**. Newness is **until-seen**, never time-decayed, and "seen" means **the map
+was actually on screen**, not merely that the app was opened. A dot, a highlight, a star — whatever
+reads best; those were suggestions, not a taxonomy. No GM-side visibility into who has seen what.
+
+**96. Author player-targeted entries before anyone has joined.** `EntryEditor` refuses to save a
+"Specific players" entry with an empty list
+([web/src/components/EntryEditor.tsx:140](web/src/components/EntryEditor.tsx:140)) and shows "No
+players have joined yet" during `setup`, so targeted authoring is pushed into the minutes before
+the start. The refusal is not arbitrary — the server reads an empty `playerIds` as **"anyone"**
+([functions/src/geofence.ts:108](functions/src/geofence.ts:108)) — so fix the semantics, not the
+dialog: a targeted-but-unassigned entry must be **inert**, authorable and skipped by crossing
+resolution until it is filled in.
+
+- **Warn at Start, never block.** There are mechanics where the assignee genuinely isn't known
+  until someone arrives somewhere, so an unassigned entry is a legitimate state to start a game in.
+- **Assigning during play already works and must keep working.**
+- **The existing per-player targeting is sufficient** — no "any N players", no by-district.
+- **Cloning a game strips targets back to inert.**
+
+**97. Player-armed traps.** *The largest item in the tier.* The GM pre-sets traps; a player finds a
+physical **trap kit** — usually a card — that corresponds to one of them, and arms it when they
+choose. The player picks *where* and *who is spared*; everything else is the GM's.
+
+- **A kit is a specific pre-set trap.** The card identifies which one, so arming is: enter the
+  kit's code, stand near the site, choose exclusions. Each kit is **single-use**, and the number in
+  play is bounded by how many cards the GM physically puts out — **no in-app per-player limit**.
+- **Arming requires being within 100 m of the checkpoint**, not standing exactly on it: GPS in
+  these woods can't support tighter, and #82 measured exactly why. Server-checked against the
+  player's own last fix.
+- **Exclusions only — there is no include list.** The player names who is *spared*; everyone else
+  is fair game. That is what makes warning your friends out of band mean something in the app.
+- **An excluded player who crosses sees nothing at all.** No "you avoided something" — the whole
+  point is that they never know.
+- **It never fires on the player who armed it.**
+- **Arming is immediate.** No GM approval step.
+- **The armer is never told it fired, or on whom.** With a real trap you'd have to see it happen;
+  the game mechanic matches.
+- **Victims: the GM sets how many the trap can catch, and they must arrive within 15 seconds of the
+  first.** Same effect for everyone caught — no weaker second slot. This is a *co-arrival* window,
+  which is not what the existing `fixed-order` slots model (those are per-distinct-arriver with no
+  clock), so it needs its own resolution path — though #5's 90-second same-district suppression is
+  the shape of precedent.
+- **Traps never expire, and survive their owner's death.**
+- **The GM decides whether springing it reveals the checkpoint** (the existing `revealOnFire`).
+- **The GM writes the text; the arming player never does** — so no player-authored text ever
+  reaches another player, and Rule 23 stays intact while players aim effects at each other.
+- **The GM must be able to see and undo what players armed**: who, where, against whom.
+
+**98. Runbook filtering — and a mobile runbook view.** Two halves of unequal size.
+
+- **98a (small, web).** `RunbookScreen` lists every entry in two flat groups sorted by priority
+  ([web/src/screens/RunbookScreen.tsx:61](web/src/screens/RunbookScreen.tsx:61)), which stops
+  scaling at a dozen checkpoints with two or three entries each. Filter **by checkpoint** and **by
+  kind** — effect (`hazard`/`boon`/`notify`/`gm-notify`) and trigger
+  (`fixed-order`/`always-on`/`timed`/`gm-prompted`) — plus targeted-only, reveals-on-fire, and
+  (after #96) "needs players". **Filters do not persist between sessions.**
+- **98b (not small, mobile).** The mobile GM has **no runbook screen at all** — `app/(app)/gm/
+  [gameId]/` has checkpoints, run-sheet, players, rations and the map, and nothing else. So "the
+  same on mobile" means **building a runbook view**, read-and-filter, from scratch. Justified by
+  the 1–2 GMs working from phones in the field, but it is its own piece of work and shouldn't be
+  mistaken for adding a filter bar.
+
+**99. Dead players spectate the live map, two minutes after they die.** *Supersedes the "helper but
+not quite GM" role.* A dead player keeps `role: 'player'` and gains a read-only view of the arena.
+The two minutes exist because the moment right after a kill is the dangerous one — the person who
+just died is standing next to the person who killed them and knows where their allies are. With 12
+players the read cost of this is negligible; it was never the constraint.
+
+- **They see the boundary, every checkpoint, and the living players** — the checkpoints so a dead
+  player can be sent to deploy a drop. They do **not** see other dead players, and they do **not**
+  see GMs.
+- **The countdown runs from the *recorded* death**, i.e. whenever the GM or the player actually
+  marked it — not from a reconstructed time of death.
+- **Tapping out grants the same access as being killed.** Nobody trades a chance at winning for a
+  map.
+- **Players are told this up front**, in the rules/tutorial, before they ever die.
+- **No GM early release**, and the map **persists through cleanup and cuts off after it**.
+- **Dead players keep uploading their location** — needed for #94's rescue path and #84's cleanup —
+  **but are not drawn on anyone else's map**, GM or spectator, to keep the screen readable. They
+  see themselves.
+- **Anyone with an active SOS is drawn in a distinct colour** on every map that shows them, so a
+  response can start without hunting for the row.
+- **The gate is server-enforced, and it makes `outAt` load-bearing for the first time.** A client
+  timer is worth nothing. Today a player can write their own `out`/`outAt` freely — the member
+  self-update rule ([firestore.rules:150](firestore.rules:150)) pins only `role`, `userId`,
+  `district` and `sosAckAt` — so backdating `outAt` would hand them the map instantly. Pinning it
+  to the server clock is a prerequisite, not a follow-up.
+- **Revive already unwinds access** (`out: false, outAt: null`,
+  [services/gameService.ts:305](services/gameService.ts:305)) — but note it **cannot unwind what
+  they already saw**. A revived spectator knows every checkpoint on the map. That is a GM
+  operational fact, not a bug to fix.
+
+---
+
+## Tier 11 — P3 polish *(closed)*
 
 > **Built (2026-06-17):** #41 end-game phase, #42 arena overlay, #43 practice game, #44 voucher
-> preset, and #45 post-game media all shipped — see the Built & removed callout. The server/web/
-> rules sides are deploy-ready; the mobile halves ride the next APK. Only #57 remains below.
+> preset, and #45 post-game media all shipped — see the Built & removed callout.
+>
+> **#57 per-GM teams is dropped** (2026-09-06). Each GM owning a filtered subset of players was
+> recorded after the 2026-06-07 field test and is no longer wanted: the GM team runs 1–2 phones
+> plus a web dashboard over a shared view, and partitioning it would work against how they
+> actually operate. Number retired, never reused.
 
-**57. Per-GM teams.** With multiple GMs, each GM owns a team of players and only watches / tracks /
-notifies (and sends updates to) their own set. Needs per-member team assignment and notification /
-map filtering by team. *Recorded for a later tier per the 2026-06-07 field test — not in the current
-trusted-APK milestone.*
+Nothing outstanding in this tier.
 
 ---
 
@@ -316,12 +578,18 @@ its bundle ID / SHA-1 and the Maps SDK in Cloud Console before wide release. Con
 
 ## Suggested order
 
-0. **Verify the 2026-06-18 APK** once it's installed (clean-install — uninstall the old app first):
+0. *(historic — kept for the checklist reference.)* **Verify the 2026-06-18 APK** on a clean install:
    confirm the **#77** battery-optimization fix (grant "Background activity — Unrestricted" in the
    lobby, then lock the phone untouched ~3 min and confirm the player stays live on the GM map and
    checkpoints fire), **#78** (submit a ration → panel flips to "waiting for GM"), and **#79** (join a
    `setup`-phase game → "not open yet" message). Also smoke-test the mobile halves from the prior APK
    (#20–25 integrity UI, #63/#64/#66/#70/#71/#74, #11, mobile Clone). Use
    [TESTING_CHECKLIST.md](TESTING_CHECKLIST.md) (#58) for a full single-game surface pass.
-1. **Tier 11** (41–45, 57) is P3 polish (43/45 and per-GM teams deprioritized).
-2. **Deferred** (46–47) waits for a real public-store launch.
+1. **Tier 12** (84–99) — requirements settled 2026-09-06; the tier carries its own cheap-first
+   build order. **#94** leads (cheap *and* the only defect), then the small independent wins
+   (#93, #95, #85, #98a), then **#89 + #99** as one flow, then **#84** → **#88**, then **#90** and
+   the mobile runbook view (#98b), then **#96 → #97** (the largest), and finally **#87**, the
+   **#86** spike and whatever is left of **#91**.
+2. **Tier 11 is closed** — everything shipped and **#57 is dropped**.
+3. **Deferred** (46–47) waits for a real public-store launch; confirmed 2026-09-06 that no public
+   launch is planned, so both stay parked.
