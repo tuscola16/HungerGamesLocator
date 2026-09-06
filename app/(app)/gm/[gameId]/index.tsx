@@ -203,6 +203,7 @@ export default function GMGameScreen() {
     const { blockers, warnings } = startGamePreflight({
       hasBoundary: !!game?.boundary,
       checkpointCount: checkpoints.length,
+      checkpoints, // 2026-09-06: powers the too-close-checkpoints advisory
       playerCount: roster.length,
       gmHasToken,
       unlocatedPlayerCount: roster.length - located,
@@ -515,6 +516,12 @@ export default function GMGameScreen() {
                   <Text style={styles.badgeText}>{pendingRations}</Text>
                 </View>
               )}
+            </TouchableOpacity>
+          )}
+          {/* #98b: read-only runbook for GMs working from a phone. */}
+          {phase !== 'results' && (
+            <TouchableOpacity onPress={() => router.push(`/(app)/gm/${gameId}/runbook`)} style={styles.headerBtn}>
+              <Ionicons name="book-outline" size={22} color={Colors.text} />
             </TouchableOpacity>
           )}
           {phase !== 'results' ? (
@@ -1363,7 +1370,10 @@ const styles = StyleSheet.create({
   readyName: { fontSize: 15, color: Colors.text, fontWeight: '600' },
   readyFlags: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   readyLegend: { fontSize: 12, color: Colors.textMuted, marginTop: 12, marginBottom: 8 },
-  headerActions: { flexDirection: 'row', gap: 8 },
+  // `flexShrink: 0` so the action icons keep their size and none is clipped off the right
+  // edge: a practice game in play with rations shows eight of them, and without this the
+  // row competes with the title for width instead of the title yielding first.
+  headerActions: { flexDirection: 'row', gap: 8, flexShrink: 0 },
   headerBtn: { padding: 4 },
   headerBadge: {
     position: 'absolute', top: -2, right: -4, backgroundColor: Colors.danger,

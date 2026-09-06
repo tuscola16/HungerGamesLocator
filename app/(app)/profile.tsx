@@ -83,7 +83,6 @@ export default function ProfileScreen() {
           onChangeText={(t) => { setDisplayName(t); setSaved(false); }}
           placeholder="e.g. Ranger"
           maxLength={32}
-          autoFocus
         />
         <Text style={styles.hint}>
           This name is shown to Game Masters and other players when you join a game.

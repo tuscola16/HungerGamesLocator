@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import QRCode from 'qrcode';
 import { useGame } from '@/context/GameContext';
 import { useAuth } from '@/context/AuthContext';
 import { GameMap, type DeathMarker } from '@/components/GameMap';
@@ -176,6 +177,7 @@ export function GameScreen() {
     const { blockers, warnings } = startGamePreflight({
       hasBoundary: !!game?.boundary,
       checkpointCount: checkpoints.length,
+      checkpoints, // 2026-09-06: powers the too-close-checkpoints advisory
       playerCount: players.length,
       // The web GM dashboard is itself a live alert surface (the GM watching sees arrivals
       // in real time), so a GM FCM push token isn't required to start from web.
@@ -1337,6 +1339,7 @@ function LobbyView({
       <div className="card" style={{ textAlign: 'center' }}>
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 700, letterSpacing: 1 }}>PLAYER CODE</div>
         <CopyableCode code={playerCode} big />
+        <JoinQr code={playerCode} />
       </div>
       <h3 style={{ margin: 0 }}>{players.length} player{players.length === 1 ? '' : 's'} joined</h3>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1732,6 +1735,7 @@ function CodesModal({ playerCode, gmCode, onClose }: { playerCode: string; gmCod
         <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 700, letterSpacing: 1 }}>PLAYER CODE</div>
         <CopyableCode code={playerCode} />
         <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Players join — they can't see others or checkpoints</div>
+        <JoinQr code={playerCode} />
       </div>
       <div className="card" style={{ background: 'var(--surface-elevated)', borderColor: 'rgba(90,126,78,0.4)' }}>
         <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 700, letterSpacing: 1 }}>GM CODE</div>
@@ -1740,6 +1744,44 @@ function CodesModal({ playerCode, gmCode, onClose }: { playerCode: string; gmCod
       </div>
       <button className="btn btn--ghost btn--block" onClick={onClose}>Close</button>
     </Modal>
+  );
+}
+
+/**
+ * #92: the player code as a scannable QR. Encodes the app's deep link
+ * (`outdoorgm://join?code=…`, matching `scheme` in app.json), which `/join` reads and
+ * prefills — so the phone camera does the scanning and the app never needs a reader.
+ *
+ * On screen only, never printed: the code is a secret (game docs are member-readable
+ * precisely so codes don't leak), so it should not end up on a poster someone photographs.
+ */
+function JoinQr({ code }: { code: string }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el || !/^[A-Z0-9]{6}$/i.test(code)) return;
+    QRCode.toCanvas(el, `outdoorgm://join?code=${encodeURIComponent(code)}`, {
+      width: 168,
+      margin: 1,
+      // Fixed light-on-dark rather than themed: a scanner wants contrast, not our palette.
+      color: { dark: '#000000', light: '#ffffff' },
+    }).catch(() => setFailed(true));
+  }, [code]);
+
+  // Only render for something that actually looks like a game code. `LobbyView` is passed
+  // `game?.playerCode ?? '…'`, so before the game doc resolves this would otherwise encode
+  // the literal ellipsis — invisible to a scanner, which has no way to tell a placeholder
+  // from a real code the way a human reading "…" does.
+  if (failed || !/^[A-Z0-9]{6}$/i.test(code)) return null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, marginTop: 12 }}>
+      <canvas ref={canvasRef} style={{ borderRadius: 8, background: '#fff', padding: 6 }} />
+      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+        Scan with a phone camera to join
+      </span>
+    </div>
   );
 }
 

@@ -41,6 +41,9 @@ import type { Game, GameConfig, GamePhase, MapBoundary, RevealedMarker } from '@
 
 type Ts = Timestamp | null;
 
+/** #95: how long a newly revealed marker stays flagged once the map is on screen. */
+const MARKER_SEEN_MS = 5000;
+
 export default function PlayerGameScreen() {
   const { gameId } = useLocalSearchParams<{ gameId: string }>();
   const { user } = useAuth();
@@ -230,6 +233,75 @@ export default function PlayerGameScreen() {
     () => markers.filter((m) => m.checkpointId !== ENDGAME_RALLY_ID),
     [markers]
   );
+
+  // #95: a site that has appeared since the player last had the map on screen draws as
+  // "new". Per device (AsyncStorage), never time-decayed, and fail-soft in both
+  // directions — while the state is still loading, or if storage throws, nothing is marked
+  // new, which is exactly the pre-#95 behavior.
+  //
+  // `since` is the anti-backlog guard: on this device's first open of the game we stamp the
+  // clock, and a marker revealed before that is never "new" — otherwise every
+  // always-shown checkpoint would light up at once on the screen the player is using to
+  // orient themselves, which is noise, not signal.
+  const [seenMarkers, setSeenMarkers] = useState<{ seen: Set<string>; since: number } | null>(null);
+  const seenMarkersKey = gameId ? `seen_markers_${gameId}` : null;
+
+  useEffect(() => {
+    if (!seenMarkersKey) return;
+    let cancelled = false;
+    AsyncStorage.getItem(seenMarkersKey)
+      .then((raw) => {
+        if (cancelled) return;
+        if (!raw) {
+          // First open on this device: everything already revealed counts as seen.
+          // Persist immediately so `since` is stable across launches.
+          const fresh = { seen: new Set<string>(), since: Date.now() };
+          setSeenMarkers(fresh);
+          AsyncStorage.setItem(seenMarkersKey, JSON.stringify({ seen: [], since: fresh.since }))
+            .catch(() => {});
+          return;
+        }
+        try {
+          const parsed = JSON.parse(raw) as { seen?: string[]; since?: number };
+          setSeenMarkers({ seen: new Set(parsed.seen ?? []), since: parsed.since ?? Date.now() });
+        } catch {
+          setSeenMarkers({ seen: new Set(), since: Date.now() });
+        }
+      })
+      .catch(() => { if (!cancelled) setSeenMarkers({ seen: new Set(), since: Date.now() }); });
+    return () => { cancelled = true; };
+  }, [seenMarkersKey]);
+
+  const newMarkerIds = useMemo(() => {
+    if (!seenMarkers) return new Set<string>();
+    return new Set(
+      siteMarkers
+        .filter((m) => {
+          if (seenMarkers.seen.has(m.checkpointId)) return false;
+          // No timestamp (legacy marker) → treat as not new, matching pre-#95 behavior.
+          const revealedMs = m.revealedAt?.toMillis?.();
+          return revealedMs != null && revealedMs > seenMarkers.since;
+        })
+        .map((m) => m.checkpointId)
+    );
+  }, [siteMarkers, seenMarkers]);
+
+  // "Seen" means the map was actually displayed — not that the app was opened — so the
+  // set only advances while the map tab is up, and only after a beat, so a marker that
+  // lands while the player is watching still gets a moment of being visibly new.
+  useEffect(() => {
+    if (playTab !== 'map' || !seenMarkersKey || !seenMarkers || newMarkerIds.size === 0) return;
+    const t = setTimeout(() => {
+      const next = new Set(seenMarkers.seen);
+      newMarkerIds.forEach((id) => next.add(id));
+      setSeenMarkers({ seen: next, since: seenMarkers.since });
+      AsyncStorage.setItem(
+        seenMarkersKey,
+        JSON.stringify({ seen: [...next], since: seenMarkers.since })
+      ).catch(() => {});
+    }, MARKER_SEEN_MS);
+    return () => clearTimeout(t);
+  }, [playTab, seenMarkersKey, seenMarkers, newMarkerIds]);
 
   // Show the intro tutorial once per game, while waiting in the lobby.
   useEffect(() => {
@@ -453,11 +525,29 @@ export default function PlayerGameScreen() {
             raiseSos(gameId, user.uid).catch((err: Error) => console.error('[SOS] raiseSos failed', err));
             Alert.alert(
               'Alert sent',
-              "The Game Master has been notified and can see your location. If you're offline, it sends the moment you reconnect."
+              out
+                // Tracking stops at death (#94: the lift is still to come), so don't
+                // promise a live position the GM doesn't have.
+                ? "The Game Master has been notified and can see your last known location. If you're offline, it sends the moment you reconnect."
+                : "The Game Master has been notified and can see your location. If you're offline, it sends the moment you reconnect."
             );
           },
         },
       ]
+    );
+  }
+
+  /**
+   * The safety alert (Rule 22). Deliberately rendered in **every** state a member can be
+   * in, alive or out (#94) — a player who has been killed is exactly who is most likely to
+   * be alone, cold and walking out of the arena, and the control must not disappear on them.
+   */
+  function renderSosButton() {
+    return (
+      <TouchableOpacity style={styles.sosBtn} onPress={handleSos}>
+        <Ionicons name="alert-circle-outline" size={18} color={Colors.danger} />
+        <Text style={styles.sosText}>Safety alert — I need help</Text>
+      </TouchableOpacity>
     );
   }
 
@@ -490,6 +580,9 @@ export default function PlayerGameScreen() {
           <Ionicons name="help-circle-outline" size={18} color={Colors.primary} />
           <Text style={styles.howToText}>How to play</Text>
         </TouchableOpacity>
+        {/* #94: the safety alert is reachable before the game starts too — people are
+            already in the arena in the lobby, and the GMs are on the other end of it. */}
+        <View style={styles.waitSosWrap}>{renderSosButton()}</View>
         {/* Ask for every permission now, in the lobby, instead of mid-game. */}
         {phase === 'lobby' && <LobbyPermissions rationsEnabled={config.rationsEnabled} />}
         {gameId ? (
@@ -587,6 +680,7 @@ export default function PlayerGameScreen() {
                   checkpoints={[]}
                   playerLocations={[]}
                   markers={siteMarkers}
+                  newMarkerIds={newMarkerIds}
                   rallyPoint={rallyPoint}
                   boundary={boundary}
                   mapOverlay={mapOverlay}
@@ -708,22 +802,24 @@ export default function PlayerGameScreen() {
             is up so it can't float over the ration-card input; it returns the moment
             the keyboard closes (e.g. as soon as the camera launch dismisses it). */}
         {out ? (
-          <View style={[styles.statusCard, styles.outCard]}>
-            <View style={[styles.statusDot, styles.inactiveDot]} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.statusTitle}>You're out</Text>
-              <Text style={styles.statusSub}>
-                Wave your red bandana overhead as you exit the arena (Rule 2).
-              </Text>
+          <>
+            <View style={[styles.statusCard, styles.outCard]}>
+              <View style={[styles.statusDot, styles.inactiveDot]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.statusTitle}>You're out</Text>
+                <Text style={styles.statusSub}>
+                  Wave your red bandana overhead as you exit the arena (Rule 2).
+                </Text>
+              </View>
             </View>
-          </View>
+            {/* #94: still reachable after death — no keyboard guard needed here, since a
+                dead player has no ration panel for the bar to float over. */}
+            <View style={styles.outBtnWrap}>{renderSosButton()}</View>
+          </>
         ) : !keyboardUp ? (
           <View style={styles.outBtnWrap}>
             <Button title="I've been killed" onPress={handleMarkOut} variant="danger" />
-            <TouchableOpacity style={styles.sosBtn} onPress={handleSos}>
-              <Ionicons name="alert-circle-outline" size={18} color={Colors.danger} />
-              <Text style={styles.sosText}>Safety alert — I need help</Text>
-            </TouchableOpacity>
+            {renderSosButton()}
           </View>
         ) : null}
       </>
@@ -915,6 +1011,7 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: Colors.danger,
   },
   settingsBtnText: { color: Colors.danger, fontSize: 13, fontWeight: '600' },
+  waitSosWrap: { alignSelf: 'stretch', marginTop: 4 },
   outBtnWrap: {
     paddingHorizontal: 16, paddingTop: 8, paddingBottom: 16, gap: 10,
     backgroundColor: Colors.background, borderTopWidth: 1, borderTopColor: Colors.border,

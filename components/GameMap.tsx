@@ -51,6 +51,8 @@ interface GameMapProps {
   playerLocations: PlayerLocation[];
   boundary?: MapBoundary | null;
   deathMarkers?: DeathMarker[];
+  /** #95: checkpointIds the player hasn't had on screen yet — drawn as "new". */
+  newMarkerIds?: Set<string>;
   /** Player-visible checkpoint markers (#48): label + location only, no radius or
    * secret payload. Rendered for the player's own map (the player never gets the full
    * `checkpoints` collection). */
@@ -183,18 +185,22 @@ function CheckpointMarker({
   );
 }
 
-/** A checkpoint revealed to this player (#48) — same glyph as the GM's, label + location only. */
-function RevealedMarkerPin({ marker }: { marker: RevealedMarker }) {
+/** A checkpoint revealed to this player (#48) — same glyph as the GM's, label + location only.
+ *  `isNew` (#95) flags a site that has appeared since the player last had the map on screen. */
+function RevealedMarkerPin({ marker, isNew }: { marker: RevealedMarker; isNew?: boolean }) {
   const tracks = useSettledTracking();
   return (
     <Marker
       coordinate={{ latitude: marker.latitude, longitude: marker.longitude }}
       title={marker.name}
-      description="Revealed location"
+      description={isNew ? 'New — revealed since you last looked' : 'Revealed location'}
       anchor={{ x: 0.5, y: 0.5 }}
       tracksViewChanges={tracks}
     >
-      <IconPin icon={marker.icon} color={Colors.secondary} />
+      <View>
+        <IconPin icon={marker.icon} color={isNew ? Colors.primary : Colors.secondary} />
+        {isNew && <View style={styles.newMarkerDot} />}
+      </View>
     </Marker>
   );
 }
@@ -205,6 +211,7 @@ export function GameMap({
   boundary,
   deathMarkers = [],
   markers = [],
+  newMarkerIds,
   onMapLongPress,
   onMapPress,
   rallyPoint,
@@ -305,9 +312,19 @@ export function GameMap({
           editMode={editMode}
         />
       ))}
-      {markers.map((m) => (
-        <RevealedMarkerPin key={`marker-${m.checkpointId}`} marker={m} />
-      ))}
+      {markers.map((m) => {
+        const isNew = newMarkerIds?.has(m.checkpointId) ?? false;
+        // The key carries `isNew` on purpose: `tracksViewChanges` is switched off ~1.5s
+        // after mount, so an in-place pin would not repaint when the flag clears. A
+        // remount restarts that timer and is the cheapest reliable repaint.
+        return (
+          <RevealedMarkerPin
+            key={`marker-${m.checkpointId}-${isNew ? 'new' : 'seen'}`}
+            marker={m}
+            isNew={isNew}
+          />
+        );
+      })}
       {rallyPoint && (
         <Marker
           coordinate={rallyPoint}
@@ -366,6 +383,13 @@ const styles = StyleSheet.create({
     color: Colors.black,
     fontWeight: '800',
     fontSize: 12,
+  },
+  // #95: "new since you last looked" badge on a revealed marker.
+  newMarkerDot: {
+    position: 'absolute', top: -2, right: -2,
+    width: 12, height: 12, borderRadius: 6,
+    backgroundColor: Colors.primary,
+    borderWidth: 2, borderColor: Colors.background,
   },
   iconPin: {
     width: 30,

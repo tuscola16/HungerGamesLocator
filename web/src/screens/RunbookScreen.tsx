@@ -4,13 +4,14 @@ import { useGame } from '@/context/GameContext';
 import {
   addScheduledEvent, updateScheduledEvent, deleteScheduledEvent,
 } from '@/services/gameService';
-import { KIND_META, TRIGGER_META } from '@/services/checkpointKinds';
+import { KIND_META, KIND_ORDER, TRIGGER_META, TRIGGER_ORDER } from '@/services/checkpointKinds';
 import { Modal } from '@/components/Modal';
 import { EntryEditor } from '@/components/EntryEditor';
 import { friendlyError } from '@/services/errorUtils';
 import { requirePositiveInt } from '@shared/common/gameConfigValidation';
 import type {
   RunbookEntry, TimedBound, ScheduledEvent, ScheduledActionType, Checkpoint,
+  CheckpointKind, RunbookTriggerType,
 } from '@shared/types';
 
 // Standalone full-page runbook editor (ROADMAP #60). Left sidebar lists entries in two
@@ -35,6 +36,18 @@ export function RunbookScreen() {
   const players = members.filter((m) => m.role === 'player');
   const [showScheduled, setShowScheduled] = useState(false);
 
+  // #98a: sidebar filters. An empty set means "no constraint on this axis", not "match
+  // nothing". Deliberately not persisted — they reset with every visit.
+  const [cpFilter, setCpFilter] = useState<string>('all');
+  const [kindFilter, setKindFilter] = useState<Set<CheckpointKind>>(() => new Set());
+  const [triggerFilter, setTriggerFilter] = useState<Set<RunbookTriggerType>>(() => new Set());
+  const filtersActive = cpFilter !== 'all' || kindFilter.size > 0 || triggerFilter.size > 0;
+  function clearFilters() {
+    setCpFilter('all');
+    setKindFilter(new Set());
+    setTriggerFilter(new Set());
+  }
+
   // #61: clock-triggered announcements (broadcasts, player-count, gear drops, GM reminders).
   // Timed checkpoint *reveals* live on the checkpoint editor (stored as `reveal-checkpoint`
   // scheduled events), so exclude them here.
@@ -58,14 +71,21 @@ export function RunbookScreen() {
 
   const cpName = (id: string) => checkpoints.find((c) => c.id === id)?.name ?? 'Unknown checkpoint';
 
-  const { alwaysOn, timed } = useMemo(() => {
+  const { alwaysOn, timed, shown } = useMemo(() => {
     const byPriority = (a: RunbookEntry, b: RunbookEntry) => (b.priority ?? 0) - (a.priority ?? 0);
-    const timed = runbookEntries
+    // #98a: all filtering happens here, before the two groups are split out, so the
+    // groups, their counts and their empty states all follow for free.
+    const visible = runbookEntries.filter((e) =>
+      (cpFilter === 'all' || e.checkpointId === cpFilter)
+      && (kindFilter.size === 0 || kindFilter.has(e.effect?.kind ?? 'gm-notify'))
+      && (triggerFilter.size === 0 || triggerFilter.has(e.trigger))
+    );
+    const timed = visible
       .filter((e) => e.trigger === 'timed')
       .sort((a, b) => byPriority(a, b) || startMinutes(a) - startMinutes(b));
-    const alwaysOn = runbookEntries.filter((e) => e.trigger !== 'timed').sort(byPriority);
-    return { alwaysOn, timed };
-  }, [runbookEntries]);
+    const alwaysOn = visible.filter((e) => e.trigger !== 'timed').sort(byPriority);
+    return { alwaysOn, timed, shown: visible.length };
+  }, [runbookEntries, cpFilter, kindFilter, triggerFilter]);
 
   const editing = selected && !selected.startsWith('new:')
     ? runbookEntries.find((e) => e.id === selected) ?? null
@@ -94,6 +114,22 @@ export function RunbookScreen() {
             </p>
           ) : (
             <NewEntryButton checkpoints={checkpoints} onPick={(cpId) => setSelected(`new:${cpId}`)} />
+          )}
+
+          {runbookEntries.length > 0 && (
+            <FilterBar
+              checkpoints={checkpoints}
+              cpFilter={cpFilter}
+              onCpFilter={setCpFilter}
+              kindFilter={kindFilter}
+              onKindFilter={setKindFilter}
+              triggerFilter={triggerFilter}
+              onTriggerFilter={setTriggerFilter}
+              active={filtersActive}
+              onClear={clearFilters}
+              shown={shown}
+              total={runbookEntries.length}
+            />
           )}
 
           <Group title="Always on" entries={alwaysOn} cpName={cpName} selectedId={editing?.id ?? null} onSelect={setSelected} />
@@ -372,6 +408,97 @@ function NewEntryButton({ checkpoints, onPick }: { checkpoints: { id: string; na
             </button>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+/** #98a: sidebar filters — checkpoint, effect kind and trigger. View state only. */
+function FilterBar({
+  checkpoints, cpFilter, onCpFilter, kindFilter, onKindFilter,
+  triggerFilter, onTriggerFilter, active, onClear, shown, total,
+}: {
+  checkpoints: Checkpoint[];
+  cpFilter: string;
+  onCpFilter: (v: string) => void;
+  kindFilter: Set<CheckpointKind>;
+  onKindFilter: (v: Set<CheckpointKind>) => void;
+  triggerFilter: Set<RunbookTriggerType>;
+  onTriggerFilter: (v: Set<RunbookTriggerType>) => void;
+  active: boolean;
+  onClear: () => void;
+  shown: number;
+  total: number;
+}) {
+  /** Sets are held in state, so never mutate — swap in a fresh one. */
+  function toggled<T>(set: Set<T>, v: T): Set<T> {
+    const next = new Set(set);
+    if (next.has(v)) next.delete(v); else next.add(v);
+    return next;
+  }
+
+  const chip = (on: boolean, key: string, label: string, onClick: () => void) => (
+    <button
+      key={key}
+      type="button"
+      onClick={onClick}
+      style={{
+        fontSize: 11, padding: '3px 8px', borderRadius: 999, cursor: 'pointer',
+        border: `1px solid ${on ? 'var(--primary)' : 'var(--border)'}`,
+        background: on ? 'rgba(212,137,63,0.16)' : 'var(--card)',
+        color: on ? 'var(--text)' : 'var(--text-secondary)',
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={labelStyle}>Filter</span>
+        {active && (
+          <button
+            type="button"
+            onClick={onClear}
+            style={{
+              fontSize: 11, padding: '2px 8px', borderRadius: 6, cursor: 'pointer',
+              border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text-secondary)',
+            }}
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
+      <select
+        className="input"
+        style={{ fontSize: 12, padding: '6px 8px' }}
+        value={cpFilter}
+        onChange={(e) => onCpFilter(e.target.value)}
+      >
+        <option value="all">All checkpoints</option>
+        {checkpoints.map((c) => (
+          <option key={c.id} value={c.id}>{c.name || '(unnamed)'}</option>
+        ))}
+      </select>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {KIND_ORDER.map((k) =>
+          chip(kindFilter.has(k), k, `${KIND_META[k].emoji} ${KIND_META[k].label}`,
+            () => onKindFilter(toggled(kindFilter, k))))}
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {TRIGGER_ORDER.map((t) =>
+          chip(triggerFilter.has(t), t, `${TRIGGER_META[t].emoji} ${TRIGGER_META[t].label}`,
+            () => onTriggerFilter(toggled(triggerFilter, t))))}
+      </div>
+
+      {active && (
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          {shown} of {total} shown
+        </span>
       )}
     </div>
   );

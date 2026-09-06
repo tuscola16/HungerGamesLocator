@@ -14,6 +14,35 @@ import { useNow } from '@/hooks/useNow';
 import { stalenessLevel, stalenessColor, formatAgo, isLowBattery, formatBattery } from '@/services/locationStatus';
 import type { GameMember } from '@/types';
 
+/** #85: one labelled action in the per-player sheet — an icon *and* words, which is the
+ *  whole point of moving off the icon strip. */
+function MenuRow({
+  icon, color, label, onPress, destructive,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  color: string;
+  label: string;
+  onPress: () => void;
+  destructive?: boolean;
+}) {
+  return (
+    <TouchableOpacity onPress={onPress} style={menuStyles.row}>
+      <Ionicons name={icon} size={20} color={color} />
+      <Text style={[menuStyles.label, destructive ? menuStyles.destructive : null]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+const menuStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 13, paddingHorizontal: 4,
+    borderBottomWidth: 1, borderBottomColor: Colors.border,
+  },
+  label: { fontSize: 15, color: Colors.text, fontWeight: '600', flex: 1 },
+  destructive: { color: Colors.danger },
+});
+
 export default function PlayersScreen() {
   const { gameId } = useLocalSearchParams<{ gameId: string }>();
   const { members, playerLocations, phase, loadGame } = useGame();
@@ -24,6 +53,16 @@ export default function PlayersScreen() {
   // set their own district (firestore.rules), so this lives only on the GM roster.
   const [districtEditor, setDistrictEditor] = useState<GameMember | null>(null);
   const [districtInput, setDistrictInput] = useState('');
+
+  // #85: the per-player action sheet. One labelled list instead of a strip of unlabeled
+  // icons, so "eliminate" and "remove" can't be mistaken for the routine actions they used
+  // to sit beside.
+  const [actionMenu, setActionMenu] = useState<GameMember | null>(null);
+  /** Run a row action and close the sheet. Handlers keep their own confirmations. */
+  function runAction(fn: () => void) {
+    setActionMenu(null);
+    fn();
+  }
 
   // userId → last location fix (ms), for the stale-fix indicator. Outdoor GM is the
   // only tracker now, so a silent drop-off needs to be visible to the GM.
@@ -257,16 +296,6 @@ export default function PlayersScreen() {
           )}
         </View>
 
-        {/* Open the per-player detail screen (status + targeted message, #49). */}
-        {!isGM && (
-          <TouchableOpacity
-            onPress={() => router.push(`/(app)/gm/${gameId}/player/${item.userId}`)}
-            style={styles.iconBtn}
-          >
-            <Ionicons name="chatbubble-ellipses-outline" size={22} color={Colors.secondary} />
-          </TouchableOpacity>
-        )}
-
         {isOut ? (
           <View style={[styles.badge, styles.deadBadge]}>
             <Text style={styles.badgeText}>DEAD</Text>
@@ -277,48 +306,11 @@ export default function PlayersScreen() {
           </View>
         )}
 
-        {item.sos && !sosAcked && (
-          <TouchableOpacity onPress={() => handleAckSos(item)} style={styles.iconBtn}>
-            <Ionicons name="checkmark-circle" size={24} color={Colors.warning} />
-          </TouchableOpacity>
-        )}
-
-        {item.sos && (
-          <TouchableOpacity onPress={() => handleClearSos(item)} style={styles.iconBtn}>
-            <Ionicons name={sosAcked ? 'close-circle' : 'alert-circle'} size={24} color={Colors.danger} />
-          </TouchableOpacity>
-        )}
-
-        {/* Eliminate is only meaningful for a living player. */}
-        {!isGM && !isOut && (
-          <TouchableOpacity onPress={() => handleEliminate(item)} style={styles.iconBtn}>
-            <Ionicons name="skull-outline" size={22} color={Colors.danger} />
-          </TouchableOpacity>
-        )}
-
-        {/* Revive a dead player (#21): reverse an accidental kill, reopening the game if needed. */}
-        {!isGM && isOut && (
-          <TouchableOpacity onPress={() => handleRevive(item)} style={styles.iconBtn}>
-            <Ionicons name="heart-outline" size={22} color={Colors.success} />
-          </TouchableOpacity>
-        )}
-
-        <TouchableOpacity onPress={() => handleRoleToggle(item)} style={styles.iconBtn}>
-          <Ionicons
-            name={isGM ? 'arrow-down-circle-outline' : 'arrow-up-circle-outline'}
-            size={22}
-            color={Colors.textSecondary}
-          />
+        {/* #85: every action lives behind this. The row keeps only status — badge,
+            SOS/stale/battery line — so nothing destructive is one stray tap away. */}
+        <TouchableOpacity onPress={() => setActionMenu(item)} style={styles.iconBtn}>
+          <Ionicons name="ellipsis-vertical" size={22} color={Colors.textSecondary} />
         </TouchableOpacity>
-
-        {/* Hard-remove is only available before the game starts (#20). Once in play/
-            results, member docs are delete-locked to preserve timing/death history —
-            the GM eliminates instead. */}
-        {(phase === 'setup' || phase === 'lobby') && (
-          <TouchableOpacity onPress={() => handleRemove(item)} style={styles.iconBtn}>
-            <Ionicons name="person-remove-outline" size={22} color={Colors.danger} />
-          </TouchableOpacity>
-        )}
       </View>
     );
   }
@@ -373,6 +365,124 @@ export default function PlayersScreen() {
           </View>
         }
       />
+
+      {/* #85: per-player actions. Built from the same conditionals the icon strip used,
+          so what a GM can do is unchanged — only how they reach it. */}
+      <Modal
+        visible={actionMenu != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setActionMenu(null)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setActionMenu(null)}
+        >
+          <TouchableOpacity style={styles.modalCard} activeOpacity={1}>
+            {actionMenu && (() => {
+              // Resolve the *live* member each render: `actionMenu` only holds the identity
+              // of the row that was tapped. Holding the object froze it, so a member doc
+              // that changed while the sheet was open (the player tapping out, a co-GM
+              // setting a district, an SOS arriving) left the sheet offering stale actions
+              // and seeding the district editor from stale data. Falls back to the captured
+              // object if the member has since been removed from the game.
+              const m = members.find((x) => x.userId === actionMenu.userId) ?? actionMenu;
+              const mIsGM = m.role === 'gm';
+              const mIsOut = !!m.out;
+              const mSosAcked = !!m.sosAckAt;
+              return (
+                <>
+                  <Text style={styles.modalTitle}>{m.displayName}</Text>
+
+                  {!mIsGM && (
+                    <MenuRow
+                      icon="chatbubble-ellipses-outline"
+                      color={Colors.secondary}
+                      label="Status & message"
+                      onPress={() => runAction(() => router.push(`/(app)/gm/${gameId}/player/${m.userId}`))}
+                    />
+                  )}
+
+                  {m.sos && !mSosAcked && (
+                    <MenuRow
+                      icon="checkmark-circle"
+                      color={Colors.warning}
+                      label="Acknowledge safety alert"
+                      onPress={() => runAction(() => handleAckSos(m))}
+                    />
+                  )}
+
+                  {m.sos && (
+                    <MenuRow
+                      icon={mSosAcked ? 'close-circle' : 'alert-circle'}
+                      color={Colors.danger}
+                      label="Stand down safety alert"
+                      onPress={() => runAction(() => handleClearSos(m))}
+                    />
+                  )}
+
+                  {!mIsGM && (
+                    <MenuRow
+                      icon="people-outline"
+                      color={Colors.textSecondary}
+                      label={m.district != null && String(m.district).trim() !== ''
+                        ? `Change district (currently ${m.district})`
+                        : 'Assign a district'}
+                      onPress={() => runAction(() => openDistrictEditor(m))}
+                    />
+                  )}
+
+                  <MenuRow
+                    icon={mIsGM ? 'arrow-down-circle-outline' : 'arrow-up-circle-outline'}
+                    color={Colors.textSecondary}
+                    label={mIsGM ? 'Demote to player' : 'Promote to Game Master'}
+                    onPress={() => runAction(() => handleRoleToggle(m))}
+                  />
+
+                  {/* Revive a dead player (#21): reverse an accidental kill. */}
+                  {!mIsGM && mIsOut && (
+                    <MenuRow
+                      icon="heart-outline"
+                      color={Colors.success}
+                      label="Revive — undo this elimination"
+                      onPress={() => runAction(() => handleRevive(m))}
+                    />
+                  )}
+
+                  {/* Eliminate is only meaningful for a living player. */}
+                  {!mIsGM && !mIsOut && (
+                    <MenuRow
+                      icon="skull-outline"
+                      color={Colors.danger}
+                      label="Eliminate from the game"
+                      destructive
+                      onPress={() => runAction(() => handleEliminate(m))}
+                    />
+                  )}
+
+                  {/* Hard-remove is only available before the game starts (#20). Once in
+                      play/results, member docs are delete-locked to preserve timing and
+                      death history — the GM eliminates instead. */}
+                  {(phase === 'setup' || phase === 'lobby') && (
+                    <MenuRow
+                      icon="person-remove-outline"
+                      color={Colors.danger}
+                      label="Remove from the game"
+                      destructive
+                      onPress={() => runAction(() => handleRemove(m))}
+                    />
+                  )}
+
+                  <TouchableOpacity onPress={() => setActionMenu(null)} style={styles.menuCancel}>
+                    <Text style={styles.modalBtnCancel}>Cancel</Text>
+                  </TouchableOpacity>
+                </>
+              );
+            })()}
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
 
       <Modal
         visible={districtEditor != null}
@@ -549,6 +659,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   modalActionsRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  menuCancel: { paddingVertical: 12, alignItems: 'center', marginTop: 4 },
   modalBtn: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8 },
   modalBtnClear: { color: Colors.danger, fontWeight: '700', fontSize: 14 },
   modalBtnCancel: { color: Colors.textSecondary, fontWeight: '700', fontSize: 14 },
