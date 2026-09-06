@@ -21,6 +21,11 @@ interface GameMapProps {
   /** Runbook entries (#60) — used to color a checkpoint's pin by its top effect. */
   runbookEntries?: RunbookEntry[];
   playerLocations: PlayerLocation[];
+  /**
+   * #99: member ids with an open safety alert. Drawn in a distinct colour, so a response
+   * starts without hunting the roster for the red row.
+   */
+  sosUserIds?: Set<string>;
   deathMarkers?: DeathMarker[];
   boundary?: MapBoundary | null;
   /** When true, clicking the map adds a checkpoint and a drag draws the boundary. */
@@ -108,6 +113,7 @@ export function GameMap({
   checkpoints,
   runbookEntries = [],
   playerLocations,
+  sosUserIds,
   deathMarkers = [],
   boundary,
   editMode = false,
@@ -584,15 +590,22 @@ export function GameMap({
       // Low-battery flag (#35): red ring + a "🪫 N%" note in the popup so a player about to
       // go dark stands out on the map, not just the roster.
       const low = isLowBattery(p.battery);
-      const popupText = low
-        ? `${p.displayName} · 🪫 ${typeof p.battery === 'number' ? formatBattery(p.battery) : 'low'}`
-        : p.displayName;
-      const border = low ? '2px solid var(--danger, #E8402A)' : '2px solid #fff';
+      // #99: an open safety alert outranks everything else this marker can say. It takes
+      // the whole dot, not just the ring, so it is findable in a field of pins at a glance.
+      const sos = sosUserIds?.has(p.userId) ?? false;
+      const popupText = sos
+        ? `🆘 ${p.displayName} needs assistance`
+        : low
+          ? `${p.displayName} · 🪫 ${typeof p.battery === 'number' ? formatBattery(p.battery) : 'low'}`
+          : p.displayName;
+      const border = low && !sos ? '2px solid var(--danger, #E8402A)' : '2px solid #fff';
+      const background = sos ? 'var(--danger, #E8402A)' : COLORS.playerDot;
+      const label = sos ? '🆘' : initials;
       let marker = playerMarkers.current[p.userId];
       if (!marker) {
         const el = document.createElement('div');
-        el.style.cssText = `width:34px;height:34px;border-radius:50%;background:${COLORS.playerDot};border:${border};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;color:#000;box-shadow:0 2px 4px rgba(0,0,0,.5)`;
-        el.textContent = initials;
+        el.style.cssText = `width:34px;height:34px;border-radius:50%;background:${background};border:${border};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;color:#000;box-shadow:0 2px 4px rgba(0,0,0,.5)`;
+        el.textContent = label;
         marker = new mapboxgl.Marker({ element: el }).setLngLat([p.longitude, p.latitude]);
         marker.setPopup(new mapboxgl.Popup({ offset: 20 }).setText(popupText));
         marker.addTo(map);
@@ -600,8 +613,9 @@ export function GameMap({
       } else {
         marker.setLngLat([p.longitude, p.latitude]);
         const el = marker.getElement();
-        el.textContent = initials;
+        el.textContent = label;
         el.style.border = border;
+        el.style.background = background;
         marker.getPopup()?.setText(popupText);
       }
     }

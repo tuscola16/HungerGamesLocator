@@ -66,4 +66,6 @@ export const Collections = {
   RATIONS: 'rations',
   SCHEDULED_EVENTS: 'scheduledEvents',
   MARKERS: 'markers',
+  /** #88: the player-readable roster projection. Server-written; never client-writable. */
+  ROSTER: 'roster',
 } as const;

@@ -157,6 +157,17 @@ export function GameScreen() {
     return ms == null || now - ms >= STALE_MS;
   }).length;
   const aliveCount = players.filter((p) => !p.out).length;
+
+  // #94/#99: dead players keep uploading now, so the map has to decide what to draw.
+  // Normally they are hidden — a dozen pins for people no longer playing just make the
+  // living harder to pick out. The two exceptions are an **open safety alert** (which is
+  // precisely the case the lifted tracking gate exists for — withholding that pin would
+  // defeat #94) and **`cleanup`** (#84), whose entire job is finding people and props.
+  const sosUserIds = new Set(members.filter((m) => m.sos).map((m) => m.userId));
+  const hiddenOnMap = new Set(members.filter((m) => m.out && !m.sos).map((m) => m.userId));
+  const drawnLocations =
+    phase === 'cleanup' ? playerLocations : playerLocations.filter((l) => !hiddenOnMap.has(l.userId));
+
   const deathMarkers: DeathMarker[] = members
     .filter((m) => m.out && m.deathLocation)
     .map((m) => ({
@@ -285,7 +296,8 @@ export function GameScreen() {
             sosPlayers={players.filter((p) => p.sos)}
             checkpoints={checkpoints}
             runbookEntries={runbookEntries}
-            playerLocations={playerLocations}
+            playerLocations={drawnLocations}
+            sosUserIds={sosUserIds}
             deathMarkers={deathMarkers}
             boundary={game?.boundary}
             arrivals={arrivals}
@@ -1363,7 +1375,7 @@ function LobbyView({
 
 function PlayView({
   gameId, phase, remaining, aliveCount, activeCount, arrivalsCount, notReporting, sosPlayers,
-  checkpoints, runbookEntries, playerLocations, deathMarkers, boundary, arrivals, entryTrips, members, busy,
+  checkpoints, runbookEntries, playerLocations, sosUserIds, deathMarkers, boundary, arrivals, entryTrips, members, busy,
   rationsEnabled, pendingRations, onOpenRations, mapOverlay,
   placingRally, rallyPoint, rallyDraftSet, onPlaceRally, onStartPlaceRally, onCancelRally, onConfirmEndgame,
   onBroadcast, onAckSos, onClearSos, onOpenPlayers, onEnd,
@@ -1379,6 +1391,8 @@ function PlayView({
   checkpoints: Checkpoint[];
   runbookEntries: RunbookEntry[];
   playerLocations: PlayerLocation[];
+  /** #99: ids with an open safety alert — drawn distinctly on the map. */
+  sosUserIds: Set<string>;
   deathMarkers: DeathMarker[];
   boundary?: MapBoundary | null;
   arrivals: Arrival[];
@@ -1415,6 +1429,7 @@ function PlayView({
           checkpoints={checkpoints}
           runbookEntries={runbookEntries}
           playerLocations={playerLocations}
+          sosUserIds={sosUserIds}
           deathMarkers={deathMarkers}
           boundary={boundary}
           mapOverlay={mapOverlay}
@@ -2145,7 +2160,11 @@ function ConfigModal({
   // #24: once play has begun, the interval-defining fields are frozen — changing them
   // would rescramble the ration schedule (and could retroactively starve players).
   // Disabled here with a reason; the rules enforce it server-side too.
-  const intervalLocked = phase === 'play' || phase === 'results';
+  // #41/#84/#99: this list has to match the rules' freeze exactly, or a save silently fails
+  // the whole write. The rules freeze on play / endgame / cleanup; `results` is included
+  // here as well because there is nothing left to configure once the game is over.
+  const intervalLocked =
+    phase === 'play' || phase === 'endgame' || phase === 'cleanup' || phase === 'results';
   const [duration, setDuration] = useState(String(initial.durationMinutes));
   const [gameDate, setGameDate] = useState(formatEventDate(gameDateInitial)); // 'YYYY-MM-DD' (#36)
   const [playerCount, setPlayerCount] = useState(initial.playerCountBroadcast);
@@ -2157,6 +2176,11 @@ function ConfigModal({
   const [uniqueCards, setUniqueCards] = useState(initial.enforceUniqueRationCards);
   const [autoStarve, setAutoStarve] = useState(initial.starvationMode === 'auto'); // #11
   const [tripInterval, setTripInterval] = useState(String(initial.tripIntervalMinutes ?? 2)); // #67
+  // #99: dead-player spectator map. Frozen at Start alongside the interval trio — a GM who
+  // could shorten the delay mid-game could hand one particular player the live map the
+  // moment they died, which is exactly what the delay exists to prevent.
+  const [spectator, setSpectator] = useState(initial.spectatorMapEnabled === true);
+  const [spectatorDelay, setSpectatorDelay] = useState(String(initial.spectatorDelayMinutes ?? 2));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
 
@@ -2190,6 +2214,14 @@ function ConfigModal({
           enforceUniqueRationCards: uniqueCards,
           starvationMode: autoStarve ? 'auto' : 'gm-confirmed',
           tripIntervalMinutes: tripMins,
+          // #99: sent only while unlocked. Once play starts the rules reject a change to
+          // either key, so writing the same value back would fail the whole save.
+          ...(intervalLocked
+            ? {}
+            : {
+                spectatorMapEnabled: spectator,
+                spectatorDelayMinutes: Math.max(0, Math.round(Number(spectatorDelay)) || 0),
+              }),
         },
       });
       onClose();
@@ -2234,6 +2266,37 @@ function ConfigModal({
       </span>
       <Toggle label="Declare a winner" checked={winner} onChange={setWinner} />
       <Toggle label="Battery saver" checked={battery} onChange={setBattery} />
+
+      {/* #99: dead players spectate */}
+      <div className="field" style={{ gap: 4 }}>
+        <Toggle
+          label="Dead players see the arena map"
+          checked={spectator}
+          onChange={intervalLocked ? () => {} : setSpectator}
+        />
+        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          {intervalLocked
+            ? 'Locked once the game starts — otherwise it could be switched on to help one particular player.'
+            : 'A player who is out gets a read-only view: the play area, every checkpoint, and the living players. They can then be sent to deploy a drop, help with cleanup, or answer a safety alert. Tell your players before you start.'}
+        </span>
+      </div>
+      {spectator && (
+        <div className="field">
+          <label>Delay before it opens (minutes)</label>
+          <input
+            className="input"
+            type="number"
+            value={spectatorDelay}
+            disabled={intervalLocked}
+            onChange={(e) => setSpectatorDelay(e.target.value)}
+          />
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Counts from the moment the death was recorded. The delay matters: right after a
+            kill, the person who just died is standing next to whoever killed them.
+          </span>
+        </div>
+      )}
+
       <Toggle label="Ration check" checked={rations} onChange={setRations} />
       {rations && (
         <>

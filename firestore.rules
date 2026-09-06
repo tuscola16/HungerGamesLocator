@@ -35,6 +35,30 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/games/$(gameId)).data.get('practice', false) == true;
     }
 
+    // #99: is the caller a dead player who has served out the spectator countdown?
+    //
+    // Server-enforced on purpose — a client timer is worth nothing, and this is the whole
+    // security boundary of the spectator map. The countdown runs from the *recorded* death
+    // (`outAt` as written by eliminatePlayer), which is why the member self-update rule
+    // below pins `outAt` to the server clock: without that a player could backdate their
+    // own death and skip the delay entirely.
+    //
+    // The phase clause implements "persists through cleanup, cuts off after it" — in
+    // `results` the location data is being purged anyway.
+    function isSpectator(gameId) {
+      let m = get(memberPath(gameId)).data;
+      let g = get(/databases/$(database)/documents/games/$(gameId)).data;
+      let phase = g.get('phase', g.get('status', 'active') == 'ended' ? 'results' : 'play');
+      return isSignedIn()
+        && exists(memberPath(gameId))
+        && g.get('config', {}).get('spectatorMapEnabled', false) == true
+        && (phase == 'play' || phase == 'endgame' || phase == 'cleanup')
+        && m.get('out', false) == true
+        && m.get('outAt', null) != null
+        && request.time > m.outAt + duration.value(
+             g.get('config', {}).get('spectatorDelayMinutes', 2), 'm');
+    }
+
     // Users can read/write their own profile only.
     match /users/{userId} {
       allow read, write: if isSignedIn() && request.auth.uid == userId;
@@ -87,14 +111,25 @@ service cloud.firestore {
         && (
           // #41: the interval trio is frozen once the resolved phase is `play` OR `endgame`
           // (interval edits there are moot, but the freeze should stay closed).
+          // #84/#99: `cleanup` joins them — the spectator map is still live in that phase,
+          // so leaving the freeze open there would reopen the hole it closes.
           (resource.data.get('phase', resource.data.get('status', 'active') == 'ended' ? 'results' : 'play') != 'play'
-           && resource.data.get('phase', resource.data.get('status', 'active') == 'ended' ? 'results' : 'play') != 'endgame')
+           && resource.data.get('phase', resource.data.get('status', 'active') == 'ended' ? 'results' : 'play') != 'endgame'
+           && resource.data.get('phase', resource.data.get('status', 'active') == 'ended' ? 'results' : 'play') != 'cleanup')
           || (
             request.resource.data.get('startedAt', null) == resource.data.get('startedAt', null)
             && request.resource.data.get('config', {}).get('durationMinutes', null)
                  == resource.data.get('config', {}).get('durationMinutes', null)
             && request.resource.data.get('config', {}).get('rationIntervalMinutes', null)
                  == resource.data.get('config', {}).get('rationIntervalMinutes', null)
+            // #99: the spectator knobs freeze with the interval trio. A GM who could
+            // shorten `spectatorDelayMinutes` mid-game could hand one particular player
+            // the live map the moment they died — which is precisely the two minutes the
+            // delay exists to deny.
+            && request.resource.data.get('config', {}).get('spectatorMapEnabled', null)
+                 == resource.data.get('config', {}).get('spectatorMapEnabled', null)
+            && request.resource.data.get('config', {}).get('spectatorDelayMinutes', null)
+                 == resource.data.get('config', {}).get('spectatorDelayMinutes', null)
           )
         );
 
@@ -147,6 +182,14 @@ service cloud.firestore {
         // tribute pairing (district, #10) GM-assigned only. They also can't forge an
         // SOS acknowledgement (sosAckAt is GM-write-only, #5): a self-update may leave
         // it unchanged or reset it to null (raising a fresh SOS), never set a timestamp.
+        //
+        // #99: a self-write may not choose its own `outAt`. Either it leaves the stamp
+        // untouched, or it must equal the server clock — which is exactly what
+        // `eliminatePlayer()`'s serverTimestamp() produces. This was harmless while `outAt`
+        // only skewed the player's own results timer; it became security-relevant the
+        // moment the spectator countdown started reading it, because a backdated death
+        // would hand a player the live map the instant they tapped out. GM writes are
+        // unaffected.
         allow update: if isGameGM(gameId)
           || (isSignedIn()
               && request.auth.uid == memberId
@@ -154,7 +197,9 @@ service cloud.firestore {
               && request.resource.data.userId == resource.data.userId
               && request.resource.data.get('district', null) == resource.data.get('district', null)
               && (request.resource.data.get('sosAckAt', null) == resource.data.get('sosAckAt', null)
-                  || request.resource.data.get('sosAckAt', null) == null));
+                  || request.resource.data.get('sosAckAt', null) == null)
+              && (request.resource.data.get('outAt', null) == resource.data.get('outAt', null)
+                  || request.resource.data.outAt == request.time));
 
         // A GM may remove anyone; a user may remove their own membership (leave /
         // delete account) — BUT member docs are delete-locked during `play` (#20):
@@ -168,8 +213,22 @@ service cloud.firestore {
 
       // Locations — a player writes only their own doc, and only while they are an
       // active member of the game (so a removed/kicked player can no longer upload).
+      //
+      // #99: a dead player past their spectator countdown may read the collection. This is
+      // a genuine widening — a spectator receives every location doc, including other dead
+      // players' and GMs', and the "you see only the living" part of the design is a
+      // client-side filter over that. Same honesty as the checkpoints rule above: the
+      // presentation filter is not a security boundary. What IS enforced here is the part
+      // that matters — you must be dead, the GM must have enabled it, the countdown must
+      // have run out, and the game must not be over.
+      //
+      // The listener lifecycle follows from this: a subscription attached during the
+      // countdown is denied outright rather than queued, so the client holds off and
+      // attaches when the timer expires.
       match /locations/{userId} {
-        allow read: if isGameGM(gameId) || (isSignedIn() && request.auth.uid == userId);
+        allow read: if isGameGM(gameId)
+          || (isSignedIn() && request.auth.uid == userId)
+          || isSpectator(gameId);
         allow create, update: if isSignedIn()
           && request.auth.uid == userId
           && isGameMember(gameId)
@@ -282,6 +341,16 @@ service cloud.firestore {
       // that powers the GM notification feed (#73); players never read it.
       match /entryTrips/{entryTripId} {
         allow read: if isGameGM(gameId);
+        allow write: if false;
+      }
+
+      // Roster (#88) — the player-readable projection of who is in the game. Member docs
+      // carry email + fcmToken and stay GM-only, so this is the only roster a player ever
+      // sees: names (plus an SOS flag, and post-game survival times). Written only by the
+      // roster Cloud Function (admin SDK); a client can never write it, which is what makes
+      // "elimination removes the row" a real guarantee rather than a UI convention.
+      match /roster/{rosterId} {
+        allow read: if isGameMember(gameId);
         allow write: if false;
       }
 

@@ -17,6 +17,8 @@ import { RationPanel } from '@/components/RationPanel';
 import { PostGameMedia } from '@/components/PostGameMedia';
 import { Tutorial } from '@/components/Tutorial';
 import { BroadcastsProvider } from '@/context/BroadcastsContext';
+import { DiedOverlay } from '@/components/DiedOverlay';
+import { LocationStabilizer, type StabilizedLocation } from '@/common/locationStabilizer';
 import * as Location from 'expo-location';
 import * as Application from 'expo-application';
 import {
@@ -37,7 +39,9 @@ import { useRationReminders } from '@/hooks/useRationReminders';
 import { collection, doc, onSnapshot, query, where, Timestamp, type QuerySnapshot } from '@react-native-firebase/firestore';
 import { db } from '@/services/firebase';
 import { Collections } from '@/services/firebase';
-import type { Game, GameConfig, GamePhase, MapBoundary, RevealedMarker } from '@/types';
+import type {
+  Checkpoint, Game, GameConfig, GamePhase, MapBoundary, PlayerLocation, RevealedMarker, RosterEntry,
+} from '@/types';
 
 type Ts = Timestamp | null;
 
@@ -220,6 +224,118 @@ export default function PlayerGameScreen() {
       .onSnapshot(handle, (err: Error) => console.error('[PlayerGame] my markers error', err));
     return () => { unsubGlobal(); unsubMine(); };
   }, [gameId, user]);
+
+  // ---------------------------------------------------------------------------------
+  // #99: the dead-player spectator map.
+  //
+  // A dead player keeps `role: 'player'` and gains a read-only view of the arena: the
+  // boundary, every checkpoint, and the LIVING players. Not other dead players, not GMs.
+  // The checkpoints are there so a dead player can be sent to deploy a drop, and the
+  // living players are what makes them useful to a GM at the far end of the woods.
+  //
+  // The two-minute delay exists because the moment right after a kill is the dangerous
+  // one: the person who just died is standing next to whoever killed them and knows where
+  // their allies are. It runs from the *recorded* death (`outAt` as written by
+  // eliminatePlayer), never from a reconstructed time — and it is enforced in
+  // firestore.rules, not here. This timer only decides when to *attach* the listener,
+  // because a subscription opened during the countdown is denied outright rather than
+  // queued, which would leave a permanently dead listener behind.
+  // ---------------------------------------------------------------------------------
+  const spectatorPhase = phase === 'play' || phase === 'endgame' || phase === 'cleanup';
+  const spectatorOffered = config.spectatorMapEnabled === true && out && spectatorPhase;
+  const spectatorReadyAt = useMemo(() => {
+    if (!spectatorOffered || !outAt) return null;
+    const delayMin = config.spectatorDelayMinutes ?? 2;
+    return outAt.toMillis() + delayMin * 60_000;
+  }, [spectatorOffered, outAt, config.spectatorDelayMinutes]);
+  // Derived, not stateful: `diagNow` already ticks every 2 s for the diagnostics card, and
+  // 2 s granularity is ample for a 2-minute countdown. This keeps the gate a pure function
+  // of (outAt, config, now) rather than a timer that can be left armed across a revive.
+  const spectatorLive = spectatorReadyAt != null && diagNow >= spectatorReadyAt;
+
+  // The roster projection (#88) — the ONLY roster a player may read, and during play it
+  // holds exactly the living players. It is therefore both the filter ("which of these
+  // location docs am I allowed to see?") and the SOS source, without ever touching a
+  // member doc.
+  const [roster, setRoster] = useState<RosterEntry[]>([]);
+  useEffect(() => {
+    if (!gameId) return;
+    return onSnapshot(
+      collection(db, Collections.GAMES, gameId, Collections.ROSTER),
+      (snap: QuerySnapshot) => setRoster(snap.docs.map((d) => ({ ...d.data() } as RosterEntry))),
+      (err: Error) => console.error('[PlayerGame] roster listener error', err)
+    );
+  }, [gameId]);
+
+  const [spectatorLocations, setSpectatorLocations] = useState<StabilizedLocation[]>([]);
+  const [spectatorCheckpoints, setSpectatorCheckpoints] = useState<Checkpoint[]>([]);
+  // #82: route the spectator's feed through the same jump suppression the GM contexts use,
+  // so a dead player isn't watching the teleporting map the GMs stopped seeing in September.
+  // Stabilizing happens in the snapshot callback, never during render — the stabilizer is
+  // stateful (it remembers each player's last drawn position), so calling it from a
+  // useMemo would corrupt its history on any double-render.
+  const spectatorStabilizer = useRef(new LocationStabilizer());
+  useEffect(() => {
+    const max = config.maxDisplayAccuracyMeters;
+    if (typeof max === 'number') spectatorStabilizer.current.setMaxAccuracy(max);
+  }, [config.maxDisplayAccuracyMeters]);
+
+  useEffect(() => {
+    // Nothing to clear on the inactive branch: `visibleSpectatorLocations` renders empty
+    // whenever the map isn't live, so leftover state is never read.
+    if (!gameId || !spectatorLive) return;
+    const stabilizer = spectatorStabilizer.current;
+    const unsubLoc = onSnapshot(
+      collection(db, Collections.GAMES, gameId, Collections.LOCATIONS),
+      (snap: QuerySnapshot) =>
+        setSpectatorLocations(
+          stabilizer.stabilize(snap.docs.map((d) => ({ ...d.data() } as PlayerLocation)))
+        ),
+      (err: Error) => console.error('[PlayerGame] spectator locations error', err)
+    );
+    // Checkpoints are already member-readable (the OS geofence registration needs them on
+    // the device), so this adds no permission — only the rendering the client used to
+    // withhold.
+    const unsubCp = onSnapshot(
+      collection(db, Collections.GAMES, gameId, Collections.CHECKPOINTS),
+      (snap: QuerySnapshot) =>
+        setSpectatorCheckpoints(snap.docs.map((d) => ({ id: d.id, ...d.data() } as Checkpoint))),
+      (err: Error) => console.error('[PlayerGame] spectator checkpoints error', err)
+    );
+    return () => { unsubLoc(); unsubCp(); stabilizer.reset(); };
+  }, [gameId, spectatorLive]);
+
+  /**
+   * Who a spectator may see: the people the roster lists, minus themselves.
+   *
+   * During play the roster is living-players-only, so this filter *is* the "no other dead
+   * players, no GMs" rule — expressed as an allowlist rather than a denylist, so a
+   * location doc for someone the roster doesn't mention can never leak onto the map.
+   * During `cleanup` (#84) the roster lists everyone who played, which is exactly the
+   * "everyone sees everyone" the recovery job needs, with no second code path.
+   *
+   * The rules deliberately hand a spectator the *whole* locations collection (see
+   * firestore.rules) — filtering it is presentation, not a security boundary.
+   */
+  const visibleSpectatorLocations = useMemo(() => {
+    if (!spectatorLive) return [];
+    const allowed = new Set(roster.map((r) => r.userId));
+    return spectatorLocations.filter((l) => l.userId !== user?.uid && allowed.has(l.userId));
+  }, [spectatorLive, spectatorLocations, roster, user?.uid]);
+
+  /** #99: an open safety alert draws distinctly on every map that shows the player. */
+  const sosUserIds = useMemo(
+    () => new Set(roster.filter((r) => r.sos).map((r) => r.userId)),
+    [roster]
+  );
+
+  // #89: withhold this player's OWN death toll. The broadcast still fans out to everyone
+  // else named; <DiedOverlay> is what this player gets instead. Memoized so the overlay's
+  // effect doesn't re-run on every render.
+  const suppressBroadcastIds = useMemo(
+    () => (user ? [`${user.uid}_death`] : []),
+    [user]
+  );
 
   // #41: the end-game rally point rides the same `markers` plumbing as every other
   // revealed site, so on the map it was just one more pin in a field of pins — players
@@ -566,6 +682,80 @@ export default function PlayerGameScreen() {
 
   // --- Render per phase ---
 
+  /**
+   * What a dead player sees during play / endgame / cleanup (#89 + #99).
+   *
+   * Behind the "You died" screen sits **nothing but the spectator map** — no tabs, no
+   * stats, no ration panel, no tracking diagnostics. Those all belong to a run that is
+   * over. The two things that stay are the safety alert (#94: a dead player is exactly
+   * who ends up alone and cold walking out of an arena in the dark) and the message feed,
+   * because the GM still needs to be able to reach them and they still get every other
+   * player's death.
+   *
+   * When the GM hasn't enabled the spectator map, or the countdown is still running, the
+   * same layout shows a card in place of the map rather than a different screen.
+   */
+  function renderDead() {
+    const countdownMs = spectatorReadyAt == null ? null : spectatorReadyAt - diagNow;
+    return (
+      <>
+        <View style={styles.playContent}>
+          {spectatorLive && boundary ? (
+            <View style={styles.mapFull}>
+              <GameMap
+                // Every checkpoint, so a dead player can be sent to deploy or recover a
+                // drop. The runbook behind each site stays GM-only — this is the same
+                // name/icon/location a marker carries.
+                checkpoints={spectatorCheckpoints}
+                playerLocations={visibleSpectatorLocations}
+                sosUserIds={sosUserIds}
+                markers={siteMarkers}
+                rallyPoint={rallyPoint}
+                boundary={boundary}
+                mapOverlay={mapOverlay}
+                showsUserLocation
+              />
+              <View style={styles.spectatorPill}>
+                <Ionicons name="eye-outline" size={14} color={Colors.textSecondary} />
+                <Text style={styles.spectatorPillText}>Spectating</Text>
+              </View>
+            </View>
+          ) : (
+            <View style={[styles.map, styles.mapPlaceholder]}>
+              <Ionicons name="eye-off-outline" size={40} color={Colors.textMuted} />
+              <Text style={styles.locatingText}>
+                {!spectatorOffered
+                  ? 'Your Game Master has not opened the arena map to players who are out.'
+                  : countdownMs != null && countdownMs > 0
+                    ? `The arena map opens in ${formatDuration(countdownMs)}.`
+                    : 'Opening the arena map…'}
+              </Text>
+              {spectatorOffered && countdownMs != null && countdownMs > 0 && (
+                <Text style={styles.spectatorWaitSub}>
+                  There's a short delay after every death, so nobody can use it to see where
+                  the person who just killed them went.
+                </Text>
+              )}
+            </View>
+          )}
+        </View>
+
+        <View style={[styles.statusCard, styles.outCard]}>
+          <View style={[styles.statusDot, styles.inactiveDot]} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.statusTitle}>You're out</Text>
+            <Text style={styles.statusSub}>
+              Wave your red bandana overhead as you exit the arena (Rule 2).
+            </Text>
+          </View>
+        </View>
+        {/* #94: still reachable after death — no keyboard guard needed here, since a
+            dead player has no ration panel for the bar to float over. */}
+        <View style={styles.outBtnWrap}>{renderSosButton()}</View>
+      </>
+    );
+  }
+
   function renderWaiting() {
     return (
       <ScrollView
@@ -814,22 +1004,7 @@ export default function PlayerGameScreen() {
             scrollable) content so it never overlaps it. Hidden only while the keyboard
             is up so it can't float over the ration-card input; it returns the moment
             the keyboard closes (e.g. as soon as the camera launch dismisses it). */}
-        {out ? (
-          <>
-            <View style={[styles.statusCard, styles.outCard]}>
-              <View style={[styles.statusDot, styles.inactiveDot]} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.statusTitle}>You're out</Text>
-                <Text style={styles.statusSub}>
-                  Wave your red bandana overhead as you exit the arena (Rule 2).
-                </Text>
-              </View>
-            </View>
-            {/* #94: still reachable after death — no keyboard guard needed here, since a
-                dead player has no ration panel for the bar to float over. */}
-            <View style={styles.outBtnWrap}>{renderSosButton()}</View>
-          </>
-        ) : !keyboardUp ? (
+        {!keyboardUp ? (
           <View style={styles.outBtnWrap}>
             <Button title="I've been killed" onPress={handleMarkOut} variant="danger" />
             {renderSosButton()}
@@ -890,11 +1065,20 @@ export default function PlayerGameScreen() {
         </View>
 
         {isWaiting && renderWaiting()}
-        {(phase === 'play' || phase === 'endgame') && renderPlay()}
+        {/* #89: a dead player gets their own screen, not the living one with the action
+            bar swapped out. #84: `cleanup` lands here too — the game is not over, and a
+            player still in the woods is exactly who recovery needs on the map. */}
+        {(phase === 'play' || phase === 'endgame' || phase === 'cleanup') &&
+          (out ? renderDead() : renderPlay())}
         {phase === 'results' && renderResults()}
 
-        {gameId && phase !== 'results' && <AlertOverlay gameId={gameId} />}
-        <Tutorial visible={showTutorial} onDone={dismissTutorial} rules={rules} />
+        {gameId && phase !== 'results' && (
+          <AlertOverlay gameId={gameId} suppressIds={suppressBroadcastIds} />
+        )}
+        {/* #89: full-screen and blocking, shown once per game per device. Rendered last so
+            it sits over everything, including the alert overlay. */}
+        {gameId && <DiedOverlay gameId={gameId} out={out} />}
+        <Tutorial visible={showTutorial} onDone={dismissTutorial} rules={rules} spectatorMap={config.spectatorMapEnabled === true} />
       </SafeAreaView>
     </BroadcastsProvider>
   );
@@ -974,6 +1158,17 @@ const styles = StyleSheet.create({
   map: { flex: 1 },
   mapPlaceholder: { backgroundColor: Colors.surface, alignItems: 'center', justifyContent: 'center', gap: 8 },
   locatingText: { color: Colors.textMuted, fontSize: 14, textAlign: 'center', paddingHorizontal: 16 },
+  // #99: the spectator badge — a quiet reminder that this map is a view, not a position
+  // anyone else can see you at.
+  spectatorPill: {
+    position: 'absolute', top: 12, left: 12, flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: Colors.surface + 'E6', borderRadius: 20, paddingVertical: 6, paddingHorizontal: 12,
+    borderWidth: 1, borderColor: Colors.border,
+  },
+  spectatorPillText: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary },
+  spectatorWaitSub: {
+    color: Colors.textMuted, fontSize: 12, textAlign: 'center', paddingHorizontal: 32, lineHeight: 18,
+  },
 
   statusCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12, marginHorizontal: 16, marginBottom: 12,

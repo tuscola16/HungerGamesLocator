@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Modal,
   Alert, ScrollView, TextInput, FlatList, Switch,
@@ -469,6 +469,27 @@ export default function GMGameScreen() {
     return ms == null || now - ms >= STALE_MS;
   }).length;
 
+  // #94/#99: dead players keep uploading now, so the map has to decide what to draw.
+  //
+  //  - **Normally, hide them.** A dozen extra pins that no longer play the game just make
+  //    the living harder to pick out, and readability is the point of a live map.
+  //  - **Unless they have an open safety alert** — which is exactly the case the lifted
+  //    tracking gate was FOR. Withholding the pin for the one person who called for help
+  //    would defeat #94 entirely.
+  //  - **Or unless we're in `cleanup`** (#84), where "everyone sees everyone" is the whole
+  //    phase: the recovery job is finding people and props in the dark.
+  const sosUserIds = useMemo(
+    () => new Set(members.filter((m) => m.sos).map((m) => m.userId)),
+    [members]
+  );
+  const drawnLocations = useMemo(() => {
+    if (phase === 'cleanup') return playerLocations;
+    const hidden = new Set(
+      members.filter((m) => m.out && !m.sos).map((m) => m.userId)
+    );
+    return playerLocations.filter((l) => !hidden.has(l.userId));
+  }, [playerLocations, members, phase]);
+
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       {/* Header */}
@@ -669,7 +690,8 @@ export default function GMGameScreen() {
             {tab === 'map' ? (
               <GameMap
                 checkpoints={checkpoints}
-                playerLocations={playerLocations}
+                playerLocations={drawnLocations}
+                sosUserIds={sosUserIds}
                 boundary={game?.boundary}
                 deathMarkers={members
                   .filter((m) => m.out && m.deathLocation)
@@ -744,7 +766,8 @@ export default function GMGameScreen() {
           <View style={styles.content}>
             <GameMap
               checkpoints={checkpoints}
-              playerLocations={playerLocations}
+              playerLocations={drawnLocations}
+                sosUserIds={sosUserIds}
               boundary={game?.boundary}
               deathMarkers={members
                 .filter((m) => m.out && m.deathLocation)

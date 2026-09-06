@@ -394,6 +394,23 @@ export interface GameConfig {
    * - `'manual'` — never auto-end; maps from legacy `winnerDetection: false`.
    */
   autoEndThreshold?: 'one' | 'zero' | 'manual';
+
+  // --- Dead-player spectator map (#99) ---
+  /**
+   * ROADMAP #99: once a player is out, give them a read-only view of the arena — the
+   * boundary, every checkpoint, and the living players — so they can be sent to deploy a
+   * drop, help with cleanup (#84), or answer a safety alert (#94). GM opt-in; `false` is
+   * today's behavior exactly. **Frozen at Start** with the interval config (#24).
+   */
+  spectatorMapEnabled?: boolean;
+  /**
+   * ROADMAP #99: minutes after the player's *recorded* `outAt` before living players
+   * appear. The delay exists because the moment right after a kill is the dangerous one —
+   * the person who just died is standing next to whoever killed them and knows where their
+   * allies are. `0` = immediate. **Frozen at Start** (#24), so a GM can't shorten it
+   * mid-game to help one player. Default 2.
+   */
+  spectatorDelayMinutes?: number;
 }
 
 /** Seed defaults for a new game = the base game rules. */
@@ -428,6 +445,11 @@ export const BASE_GAME_CONFIG: GameConfig = {
   // On by default: a trail that gets deleted after analysis beats a fifth field test
   // diagnosed by inference.
   locationTrail: true,
+  // #99: off by default — handing the dead a live map of the living changes the game, so
+  // it stays the GM's deliberate choice. The 2-minute delay is the safe value when they
+  // do turn it on.
+  spectatorMapEnabled: false,
+  spectatorDelayMinutes: 2,
 };
 
 /**
@@ -747,6 +769,51 @@ export interface GameMember {
    */
   district?: string | number;
   joinedAt: FsTimestamp;
+}
+
+/**
+ * A member projected into a **player-readable** roster (ROADMAP #88).
+ * Path: `games/{gameId}/roster/{userId}`. Server-written (admin SDK) from the existing
+ * `onMemberWrite` trigger; `allow write: if false`.
+ *
+ * Members can't be read by players directly — `GameMember` carries `email` and `fcmToken` —
+ * so, exactly like `markers` projects checkpoints and `Game.winnerName` denormalizes the
+ * winner (#81), this projects the one thing players are allowed to know about each other.
+ *
+ * **Two modes, one collection:**
+ * - **During play** — *living players only*. An elimination **removes** the row rather than
+ *   flagging it, so a client can't leak or scoreboard what it never receives. This is also
+ *   what the #99 spectator map filters `locations` against: the roster IS the set of people
+ *   a spectator is allowed to see on the map.
+ * - **After the game** (and during `cleanup`, #84) — *everyone who ever played*, carrying
+ *   `playedMs` so the client can order the standings without reading member docs. That
+ *   standing is most of what #91 wanted.
+ *
+ * **GMs are never listed, in either mode.**
+ */
+export interface RosterEntry {
+  userId: string;
+  displayName: string;
+  /**
+   * How long they lasted: start → their `outAt`, else the game's `endedAt`. Stamped only
+   * in the post-game/cleanup re-projection; absent during play, where nobody's run is over
+   * and a duration would be a live scoreboard.
+   */
+  playedMs?: number;
+  /** Their `outAt`, or the game's `endedAt` for a survivor. Post-game only, like `playedMs`. */
+  endedAt?: FsTimestamp | null;
+  /**
+   * Open safety alert (#94/#99). Not contact data and not a scoreboard — it is the one
+   * flag a rescue needs, and #99 requires every map that draws a player to colour an
+   * active SOS distinctly so a response starts without hunting for the row.
+   */
+  sos?: boolean;
+  /**
+   * Present only in the post-game/cleanup projection, where dead players are listed again.
+   * During play the row's *absence* is what says "out", so this is never `true` then.
+   */
+  out?: boolean;
+  updatedAt: FsTimestamp;
 }
 
 export type EliminationCause =

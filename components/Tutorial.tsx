@@ -43,9 +43,20 @@ const SLIDES: Slide[] = [
   {
     icon: 'alert-circle-outline',
     title: "If you're out — or in trouble",
-    body: 'Struck or caught? Tap “I’ve been killed” to bow out and lock in your time, then wave your red bandana as you leave the arena. Feel unsafe, injured, or too cold? Hit the Safety alert — your GM is notified instantly and can see exactly where you are.',
+    body: 'Struck or caught? Tap “I’ve been killed” to bow out and lock in your time, then wave your red bandana as you leave the arena. Feel unsafe, injured, or too cold? Hit the Safety alert — it stays available even after you’re out, and it reaches your GM and everyone else already out of the game, with your live location.',
   },
 ];
+
+/**
+ * #99: told up front, before anyone dies — a player should never discover mid-game that the
+ * dead can watch the living. Appended only when the GM has actually enabled it, so a game
+ * running without the spectator map doesn't promise something that never arrives.
+ */
+const SPECTATOR_SLIDE: Slide = {
+  icon: 'eye-outline',
+  title: 'Being out is not being finished',
+  body: 'Once you’re out, a short delay later the arena map opens up to you: the play area, every site, and where the living players are. Your GM can send you to drop supplies, help recover kit at the end, or reach someone who has called for help. Tapping out gets you the same view as being killed — nobody has to choose between the map and a chance at winning.',
+};
 
 /**
  * One-time intro shown to a player after they join, before the game starts.
@@ -55,17 +66,24 @@ export function Tutorial({
   visible,
   onDone,
   rules,
+  spectatorMap,
 }: {
   visible: boolean;
   onDone: () => void;
   rules?: string;
+  /** #99: the GM enabled the dead-player spectator map for this game. */
+  spectatorMap?: boolean;
 }) {
   const scrollRef = useRef<ScrollView>(null);
   const [index, setIndex] = useState(0);
 
-  const slides = rules?.trim()
-    ? [...SLIDES, { icon: 'document-text-outline' as const, title: "GM's rules", body: rules.trim() }]
-    : SLIDES;
+  const slides = [
+    ...SLIDES,
+    ...(spectatorMap ? [SPECTATOR_SLIDE] : []),
+    ...(rules?.trim()
+      ? [{ icon: 'document-text-outline' as const, title: "GM's rules", body: rules.trim() }]
+      : []),
+  ];
   const isLast = index >= slides.length - 1;
 
   function onScroll(e: NativeSyntheticEvent<NativeScrollEvent>) {

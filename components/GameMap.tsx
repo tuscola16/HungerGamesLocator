@@ -68,6 +68,13 @@ interface GameMapProps {
   onCheckpointPress?: (checkpoint: Checkpoint) => void;
   editMode?: boolean;
   initialRegion?: Region;
+  /**
+   * #99: member ids with an open safety alert. Any of them that appear in
+   * `playerLocations` are drawn in a distinct colour, so a response can start without
+   * hunting for the row. The GM map sources this from `members`; the spectator map from
+   * the #88 roster projection, which is the only roster a player is allowed to read.
+   */
+  sosUserIds?: Set<string>;
   /** Draw the device's own blue location dot. On for the player's own map (they
    * see only themselves); off for the GM map, which plots everyone via markers. */
   showsUserLocation?: boolean;
@@ -87,7 +94,7 @@ function boundaryCorners(b: MapBoundary) {
   ];
 }
 
-function PlayerMarker({ player }: { player: PlayerLocation }) {
+function PlayerMarker({ player, sos }: { player: PlayerLocation; sos?: boolean }) {
   const initials = player.displayName
     .split(' ')
     .map((w) => w[0])
@@ -99,12 +106,18 @@ function PlayerMarker({ player }: { player: PlayerLocation }) {
   // intentionally static — see tracksViewChanges below) so a player about to go dark is
   // visible on the map, not just the roster.
   const low = isLowBattery(player.battery);
-  const title = low
-    ? `${player.displayName} · 🪫 ${typeof player.battery === 'number' ? formatBattery(player.battery) : 'low'}`
-    : player.displayName;
+  const title = sos
+    ? `🆘 ${player.displayName} needs assistance`
+    : low
+      ? `${player.displayName} · 🪫 ${typeof player.battery === 'number' ? formatBattery(player.battery) : 'low'}`
+      : player.displayName;
 
   return (
     <Marker
+      // #99: the key carries the SOS state because `tracksViewChanges` is off — an
+      // in-place marker would keep its old bitmap when the alert is raised or stood down,
+      // and a remount is the cheapest reliable repaint (the same trick #95's new-drop pin
+      // uses).
       coordinate={{ latitude: player.latitude, longitude: player.longitude }}
       anchor={{ x: 0.5, y: 0.5 }}
       title={title}
@@ -114,8 +127,8 @@ function PlayerMarker({ player }: { player: PlayerLocation }) {
       // the map and crashes the app. Position updates still apply.
       tracksViewChanges={false}
     >
-      <View style={styles.playerMarker}>
-        <Text style={styles.playerInitials}>{initials}</Text>
+      <View style={[styles.playerMarker, sos ? styles.sosMarker : null]}>
+        <Text style={styles.playerInitials}>{sos ? '🆘' : initials}</Text>
       </View>
     </Marker>
   );
@@ -222,6 +235,7 @@ export function GameMap({
   onCheckpointPress,
   editMode = false,
   initialRegion,
+  sosUserIds,
   showsUserLocation = false,
 }: GameMapProps) {
   const mapRef = useRef<MapView>(null);
@@ -341,9 +355,16 @@ export function GameMap({
           </View>
         </Marker>
       )}
-      {playerLocations.map((pl) => (
-        <PlayerMarker key={pl.userId} player={pl} />
-      ))}
+      {playerLocations.map((pl) => {
+        const sos = sosUserIds?.has(pl.userId) ?? false;
+        return (
+          <PlayerMarker
+            key={`player-${pl.userId}-${sos ? 'sos' : 'ok'}`}
+            player={pl}
+            sos={sos}
+          />
+        );
+      })}
       {deathMarkers.map((d) => (
         <Marker
           key={`death-${d.userId}`}
@@ -381,6 +402,14 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4,
     shadowRadius: 3,
     elevation: 5,
+  },
+  // #99: an open safety alert overrides the normal player dot everywhere it is drawn.
+  sosMarker: {
+    backgroundColor: Colors.danger,
+    borderColor: Colors.white,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
   },
   playerInitials: {
     color: Colors.black,

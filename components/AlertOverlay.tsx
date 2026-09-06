@@ -26,7 +26,22 @@ const MAX_ACKED = 500;
  * (#70). The very first time a game is opened on this device, the existing backlog is
  * recorded as already-handled so prior history isn't replayed.
  */
-export function AlertOverlay({ gameId }: { gameId: string }) {
+export function AlertOverlay({
+  gameId,
+  suppressIds,
+}: {
+  gameId: string;
+  /**
+   * #89: broadcast ids this viewer must never be shown. The player screen passes their own
+   * `{userId}_death` toll — the death broadcast fans out to everyone (`targetPlayerId:
+   * null`) so that *other* players see it named, which meant it also popped
+   * "Alex has fallen" in Alex's face. `<DiedOverlay>` is what replaces it for them.
+   *
+   * Suppression is by id and stops at this component: the toll is still written, still
+   * pushed to everyone else, and every *other* player's death still reaches this player.
+   */
+  suppressIds?: string[];
+}) {
   const { broadcasts, initialized } = useBroadcasts();
   const [queue, setQueue] = useState<Broadcast[]>([]);
   // Ids the player has dismissed in-app (persisted) — never pop these again.
@@ -89,13 +104,16 @@ export function AlertOverlay({ gameId }: { gameId: string }) {
       // Fall through: on a returning device, pop any backlog the player hasn't acked yet
       // (events that landed while the app was closed).
     }
-    const fresh = broadcasts.filter((b) => !seen.current.has(b.id));
+    // #89: a suppressed id is marked seen but never queued, so it can't pop now or later.
+    const suppressed = new Set(suppressIds ?? []);
+    const fresh = broadcasts.filter((b) => !seen.current.has(b.id) && !suppressed.has(b.id));
+    broadcasts.forEach((b) => { if (suppressed.has(b.id)) seen.current.add(b.id); });
     if (fresh.length) {
       fresh.forEach((b) => seen.current.add(b.id));
       setQueue((q) => [...q, ...fresh]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [broadcasts, initialized, ackedReady]);
+  }, [broadcasts, initialized, ackedReady, suppressIds]);
 
   const current = queue[0] ?? null;
 
