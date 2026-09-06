@@ -7,10 +7,12 @@ import { useGame } from '@/context/GameContext';
 import { Colors } from '@/constants/colors';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { sendBroadcast, eliminatePlayer, clearSos, ackSos } from '@/services/gameService';
+import { sendBroadcast } from '@/services/gameService';
 import { friendlyError } from '@/services/errorUtils';
+import { PlayerActionSheet, DistrictEditorModal } from '@/components/PlayerActionSheet';
 import { useNow } from '@/hooks/useNow';
 import { stalenessLevel, stalenessColor, formatAgo, isLowBattery, formatBattery } from '@/services/locationStatus';
+import type { GameMember } from '@/types';
 
 const CAUSE_LABEL: Record<string, string> = {
   self: 'self-reported', starvation: 'starvation', 'bad-sport': 'bad sport',
@@ -32,6 +34,10 @@ export default function PlayerDetailScreen() {
 
   const [message, setMessage] = useState('');
   const [sending, setSending] = useState(false);
+  // #85.2: this screen's actions live behind the same ⋯ sheet as the roster's — nothing
+  // inline. Both pieces of state hold *which* member is open; the sheet itself is shared.
+  const [actionMenu, setActionMenu] = useState<GameMember | null>(null);
+  const [districtEditor, setDistrictEditor] = useState<GameMember | null>(null);
 
   useEffect(() => {
     if (gameId) loadGame(gameId, 'gm');
@@ -58,18 +64,6 @@ export default function PlayerDetailScreen() {
     }
   }
 
-  function handleEliminate() {
-    if (!member || !gameId) return;
-    Alert.alert(
-      `Eliminate ${member.displayName}?`,
-      'Marks this player as dead. Everyone is notified and, if they are the last one standing, the survivor wins.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Eliminate', style: 'destructive', onPress: () => eliminatePlayer(gameId, member.userId, 'gm-other').catch((e) => Alert.alert('Error', friendlyError(e))) },
-      ]
-    );
-  }
-
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <View style={styles.header}>
@@ -77,7 +71,16 @@ export default function PlayerDetailScreen() {
           <Ionicons name="arrow-back" size={24} color={Colors.text} />
         </TouchableOpacity>
         <Text style={styles.title} numberOfLines={1}>{member?.displayName ?? 'Player'}</Text>
-        <View style={{ width: 24 }} />
+        {/* #85.2: the same ⋯ overflow as the roster row, in the header where a detail
+            screen's actions belong. Everything is behind it — eliminate, revive, the SOS
+            ack/stand-down, district, role — so the body below carries status only. */}
+        {member ? (
+          <TouchableOpacity onPress={() => setActionMenu(member)} hitSlop={8}>
+            <Ionicons name="ellipsis-vertical" size={22} color={Colors.textSecondary} />
+          </TouchableOpacity>
+        ) : (
+          <View style={{ width: 24 }} />
+        )}
       </View>
 
       {!member ? (
@@ -125,20 +128,16 @@ export default function PlayerDetailScreen() {
                 </View>
               </View>
             )}
+            {/* #85.2: status only. Acknowledging and standing down moved into the ⋯ sheet,
+                where they get a label and sit under the same confirmations as everything
+                else — rather than as two bare words next to each other, one of which
+                silently closes a live safety alert. */}
             {member.sos && (
               <View style={styles.sosBanner}>
                 <Ionicons name="alert-circle" size={18} color={member.sosAckAt ? Colors.warning : Colors.danger} />
                 <Text style={[styles.sosText, member.sosAckAt ? styles.sosAckedText : null]}>
-                  {member.sosAckAt ? 'Acknowledged' : 'Needs assistance'}
+                  {member.sosAckAt ? 'Safety alert acknowledged' : 'Needs assistance'}
                 </Text>
-                {!member.sosAckAt && (
-                  <TouchableOpacity onPress={() => ackSos(gameId!, member.userId).catch(() => {})}>
-                    <Text style={styles.ackSos}>Acknowledge</Text>
-                  </TouchableOpacity>
-                )}
-                <TouchableOpacity onPress={() => clearSos(gameId!, member.userId).catch(() => {})}>
-                  <Text style={styles.clearSos}>Clear</Text>
-                </TouchableOpacity>
               </View>
             )}
           </View>
@@ -157,15 +156,25 @@ export default function PlayerDetailScreen() {
             style={styles.messageInput}
           />
           <Button title="Send to player" onPress={handleSend} loading={sending} />
-
-          {!member.out && (
-            <TouchableOpacity onPress={handleEliminate} style={styles.eliminateRow}>
-              <Ionicons name="skull-outline" size={18} color={Colors.danger} />
-              <Text style={styles.eliminateText}>Eliminate {member.displayName}</Text>
-            </TouchableOpacity>
-          )}
         </ScrollView>
       )}
+
+      {/* #85.2: identical to the roster's. `onOpenDetail` is deliberately omitted — this
+          IS the detail screen, so the row would link to where you already are. */}
+      <PlayerActionSheet
+        gameId={gameId!}
+        members={members}
+        phase={phase}
+        target={actionMenu}
+        onClose={() => setActionMenu(null)}
+        onEditDistrict={setDistrictEditor}
+      />
+
+      <DistrictEditorModal
+        gameId={gameId!}
+        member={districtEditor}
+        onClose={() => setDistrictEditor(null)}
+      />
     </SafeAreaView>
   );
 }
@@ -188,13 +197,9 @@ const styles = StyleSheet.create({
   },
   sosText: { flex: 1, color: Colors.danger, fontWeight: '700', fontSize: 14 },
   sosAckedText: { color: Colors.warning },
-  ackSos: { color: Colors.warning, fontWeight: '700', fontSize: 13, marginRight: 14 },
-  clearSos: { color: Colors.textSecondary, fontWeight: '700', fontSize: 13 },
   sectionLabel: { color: Colors.textSecondary, fontSize: 13, fontWeight: '500', textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 8 },
   hint: { color: Colors.textMuted, fontSize: 12, lineHeight: 17 },
   messageInput: { minHeight: 90, paddingTop: 12, textAlignVertical: 'top' },
-  eliminateRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingTop: 12 },
-  eliminateText: { color: Colors.danger, fontSize: 14, fontWeight: '600' },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24 },
   emptyText: { color: Colors.textSecondary, fontSize: 14, textAlign: 'center' },
 });
