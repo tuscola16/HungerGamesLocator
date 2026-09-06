@@ -28,11 +28,13 @@ export const VIS_META: Record<CheckpointVisibility, { label: string; icon: keyof
 };
 export const VIS_ORDER: CheckpointVisibility[] = ['hidden', 'shown', 'shown-on-trigger'];
 
-/** Runbook trigger presentation for read-only badges. */
+/** Runbook trigger presentation for read-only badges. Labels mirror the web authoring UI
+ * (`web/src/services/checkpointKinds.ts`) — keep the two in sync. "Time window" is
+ * deliberately not "Timed": the trigger gates a crossing, it does not fire on a clock. */
 export const TRIGGER_META: Record<RunbookTriggerType, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
   'fixed-order': { label: 'Fixed order', icon: 'list' },
   'always-on': { label: 'Always on', icon: 'infinite' },
-  timed: { label: 'Timed', icon: 'time' },
+  timed: { label: 'Time window', icon: 'time' },
   'gm-prompted': { label: 'GM prompted', icon: 'hand-left' },
 };
 

@@ -93,6 +93,7 @@ function revealScopeHint(scope: RunbookRevealScope, targeted: boolean): string {
 
 export function EntryEditor({
   gameId, entry, newCheckpointId, checkpoints, players, onSaved, onDeleted, showHeading = true,
+  onOpenScheduled,
 }: {
   gameId: string;
   entry: RunbookEntry | null;
@@ -103,6 +104,10 @@ export function EntryEditor({
   onDeleted: () => void;
   /** Off when the surrounding shell already names the entry (the checkpoint modal). */
   showHeading?: boolean;
+  /** Opens the run sheet's Scheduled-announcements modal. Supplied by the Runbook screen;
+   * omitted where no such modal is in reach (the checkpoint modal), which falls back to
+   * telling the GM where to find it. */
+  onOpenScheduled?: () => void;
 }) {
   const [checkpointId, setCheckpointId] = useState(entry?.checkpointId ?? newCheckpointId ?? checkpoints[0]?.id ?? '');
   const [name, setName] = useState(entry?.name ?? '');
@@ -234,6 +239,33 @@ export function EntryEditor({
             </button>
           ))}
         </div>
+        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{TRIGGER_META[trigger].hint}</span>
+        {trigger === 'timed' && (
+          // The 2026-09-06 field test authored three "timed" traps expecting clock-fired
+          // announcements; two never fired because nobody stood on the checkpoint inside the
+          // window. Point at the tool that actually does that, from where the GM already is.
+          <div style={{
+            fontSize: 12, lineHeight: 1.5, color: 'var(--text-secondary)', background: 'var(--surface-elevated)',
+            border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px',
+          }}>
+            Want this to reach <strong>everyone at a set time</strong>, with no checkpoint involved?
+            That’s a scheduled announcement, not a runbook entry.{' '}
+            {onOpenScheduled ? (
+              <button
+                type="button"
+                onClick={onOpenScheduled}
+                style={{
+                  background: 'none', border: 'none', padding: 0, font: 'inherit',
+                  color: 'var(--primary)', textDecoration: 'underline', cursor: 'pointer',
+                }}
+              >
+                Open ⏰ Scheduled
+              </button>
+            ) : (
+              <>Open the Runbook screen and use <strong>⏰ Scheduled</strong>.</>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Who can trip it (#80) */}

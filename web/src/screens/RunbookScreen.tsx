@@ -133,7 +133,7 @@ export function RunbookScreen() {
           )}
 
           <Group title="Always on" entries={alwaysOn} cpName={cpName} selectedId={editing?.id ?? null} onSelect={setSelected} />
-          <Group title="Timed" entries={timed} cpName={cpName} selectedId={editing?.id ?? null} onSelect={setSelected} timed />
+          <Group title="Time window" entries={timed} cpName={cpName} selectedId={editing?.id ?? null} onSelect={setSelected} timed />
         </aside>
 
         {/* Editor */}
@@ -148,6 +148,7 @@ export function RunbookScreen() {
               players={players}
               onSaved={(id) => setSelected(id)}
               onDeleted={() => setSelected(null)}
+              onOpenScheduled={() => setShowScheduled(true)}
             />
           ) : (
             <div style={{ height: '100%', display: 'grid', placeItems: 'center', color: 'var(--text-muted)' }}>

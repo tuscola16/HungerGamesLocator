@@ -47,12 +47,30 @@ export const VIS_META: Record<CheckpointVisibility, { label: string; emoji: stri
 
 export const VIS_ORDER: CheckpointVisibility[] = ['hidden', 'shown', 'shown-on-trigger'];
 
-/** Runbook trigger presentation (#60). */
-export const TRIGGER_META: Record<RunbookTriggerType, { label: string; emoji: string }> = {
-  'fixed-order': { label: 'Fixed order', emoji: '🔢' },
-  'always-on': { label: 'Always on', emoji: '♾️' },
-  timed: { label: 'Timed', emoji: '⏱️' },
-  'gm-prompted': { label: 'GM prompted', emoji: '✋' },
+/** Runbook trigger presentation (#60).
+ *
+ * `hint` exists because every trigger here is **crossing-gated** — a runbook entry only
+ * ever fires when a player is at its checkpoint. "Timed" was read as "fires at this time"
+ * in the 2026-09-06 field test and silently did nothing, so the label says *window* and the
+ * hint says the quiet part out loud. Clock-fired, checkpoint-less messages are the run
+ * sheet's job (Scheduled announcements), not the runbook's. */
+export const TRIGGER_META: Record<RunbookTriggerType, { label: string; emoji: string; hint: string }> = {
+  'fixed-order': {
+    label: 'Fixed order', emoji: '🔢',
+    hint: 'Fires on a crossing, picking its effect by the arriver’s place in line (1st, 2nd, …).',
+  },
+  'always-on': {
+    label: 'Always on', emoji: '♾️',
+    hint: 'Fires on every crossing, for the whole game.',
+  },
+  timed: {
+    label: 'Time window', emoji: '⏱️',
+    hint: 'Only gates a crossing — it never fires on its own. A player has to reach the checkpoint while the window is open, or nothing happens at all.',
+  },
+  'gm-prompted': {
+    label: 'GM prompted', emoji: '✋',
+    hint: 'Never fires on a crossing. You fire it by hand and choose who it reaches.',
+  },
 };
 
 export const TRIGGER_ORDER: RunbookTriggerType[] = ['fixed-order', 'always-on', 'timed', 'gm-prompted'];
