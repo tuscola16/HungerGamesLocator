@@ -1,6 +1,6 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { sendArrivalPushNotifications, sendPushToTokens } from './notifications';
+import { sendClassPush, type NotificationClass, type PushRecipient } from './notifications';
 import { sendArrivalSMS, TWILIO_SECRETS } from './sms';
 import { projectMarker } from './markers';
 
@@ -230,23 +230,34 @@ function pointInBoundary(lat: number, lng: number, b: MapBoundary): boolean {
   return lat >= b.minLat && lat <= b.maxLat && lng >= b.minLng && lng <= b.maxLng;
 }
 
-/** GM FCM tokens + phones for a game, optionally excluding one token (#9). */
+/**
+ * GM push recipients + phones for a game, optionally excluding one token (#9).
+ *
+ * #87: returns whole *recipients* rather than bare tokens, so each GM's mute preferences
+ * travel with their token to `sendClassPush`. SMS is unaffected — it is the safety
+ * escalation channel and carries only SOS.
+ */
 async function getGmRecipients(
   db: admin.firestore.Firestore,
   gameId: string,
   excludeToken?: string
-): Promise<{ tokens: string[]; phones: string[] }> {
+): Promise<{ recipients: PushRecipient[]; phones: string[] }> {
   const snap = await db
     .collection('games').doc(gameId).collection('members')
     .where('role', '==', 'gm').get();
-  const tokens: string[] = [];
+  const recipients: PushRecipient[] = [];
   const phones: string[] = [];
   for (const d of snap.docs) {
     const m = d.data();
-    if (m.fcmToken && m.fcmToken !== excludeToken) tokens.push(m.fcmToken as string);
+    if (m.fcmToken && m.fcmToken !== excludeToken) {
+      recipients.push({
+        fcmToken: m.fcmToken as string,
+        mutedNotifications: (m.mutedNotifications as string[] | undefined) ?? null,
+      });
+    }
     if (m.phone) phones.push(m.phone as string);
   }
-  return { tokens, phones };
+  return { recipients, phones };
 }
 
 /** Haversine formula — returns distance in meters between two coordinates. */
@@ -433,6 +444,9 @@ interface CachedMember {
   outOfBounds?: boolean;
   /** #94: eliminated / tapped out. Dead players never trip checkpoints. */
   out?: boolean;
+  /** #87: push classes this member never wants. Rides the cache, so filtering the
+   *  crossing player's own event push costs no extra read. */
+  mutedNotifications?: string[] | null;
 }
 const memberCache = new Map<string, { data: CachedMember | null; expires: number }>();
 
@@ -450,6 +464,7 @@ async function getMemberCached(gameId: string, uid: string): Promise<CachedMembe
         district: m.district as string | number | undefined,
         outOfBounds: m.outOfBounds === true,
         out: m.out === true,
+        mutedNotifications: (m.mutedNotifications as string[] | undefined) ?? null,
       }
     : null;
   memberCache.set(key, { data, expires: Date.now() + CP_CACHE_TTL_MS });
@@ -732,18 +747,21 @@ export const onLocationUpdate = functions
       if (!inside && !wasOut) {
         await memberRef.update({ outOfBounds: true });
         member.outOfBounds = true; // write through the #16 cache so the latch holds within the TTL
-        const { tokens, phones } = await getGmRecipients(db, gameId, playerFcmToken);
+        const { recipients, phones } = await getGmRecipients(db, gameId, playerFcmToken);
         const body = `${location.displayName} left the play area`;
         await Promise.allSettled([
-          sendPushToTokens(tokens, '🚧 Player left the area', body, 'arrivals'),
+          // #87: boundary-exit is explicitly mutable — it fires often enough to be noise,
+          // and that judgement is the GM's to make. The SMS is unfiltered because it only
+          // ever carries safety traffic.
+          sendClassPush(recipients, 'boundary', '🚧 Player left the area', body, 'arrivals'),
           sendArrivalSMS(phones, `BOUNDARY: ${body}`),
         ]);
       } else if (inside && wasOut) {
         await memberRef.update({ outOfBounds: false });
         member.outOfBounds = false; // write through the #16 cache
-        const { tokens } = await getGmRecipients(db, gameId, playerFcmToken);
-        await sendPushToTokens(
-          tokens, '✅ Back in the area',
+        const { recipients } = await getGmRecipients(db, gameId, playerFcmToken);
+        await sendClassPush(
+          recipients, 'boundary', '✅ Back in the area',
           `${location.displayName} re-entered the play area`, 'arrivals'
         );
       }
@@ -1253,23 +1271,34 @@ export const onLocationUpdate = functions
       .collection('games').doc(gameId).collection('members')
       .where('role', '==', 'gm').get();
 
-    const gmTokens: string[] = [];
+    // #87: recipients, not bare tokens, so each GM's mute preferences ride along to
+    // sendClassPush. This is the member read #83 removed from the crossing path — it is back,
+    // but only *after* the trip gate: a crossing that fires nothing returns above and still
+    // costs nothing.
+    const gmRecipients: PushRecipient[] = [];
     const gmPhones: string[] = [];
     for (const gmDoc of gmsSnap.docs) {
       const gm = gmDoc.data();
-      if (gm.fcmToken && gm.fcmToken !== playerFcmToken) gmTokens.push(gm.fcmToken as string);
+      if (gm.fcmToken && gm.fcmToken !== playerFcmToken) {
+        gmRecipients.push({
+          fcmToken: gm.fcmToken as string,
+          mutedNotifications: (gm.mutedNotifications as string[] | undefined) ?? null,
+        });
+      }
       if (gm.phone) gmPhones.push(gm.phone as string);
     }
 
     const needsAllPlayers = newArrivals.some(
       (a) => a.event && resolveAudience(a.event) === 'all-players'
     );
-    const allPlayerTokens = needsAllPlayers
+    const allPlayerRecipients: PushRecipient[] = needsAllPlayers
       ? (await admin.firestore().collection('games').doc(gameId).collection('members').get()).docs
           .map((d) => d.data())
-          .filter((m) => m.role !== 'gm' && !m.out)
-          .map((m) => m.fcmToken as string | undefined)
-          .filter((t): t is string => !!t)
+          .filter((m) => m.role !== 'gm' && !m.out && !!m.fcmToken)
+          .map((m) => ({
+            fcmToken: m.fcmToken as string,
+            mutedNotifications: (m.mutedNotifications as string[] | undefined) ?? null,
+          }))
       : [];
 
     await Promise.all(
@@ -1277,7 +1306,7 @@ export const onLocationUpdate = functions
         if (!event || event.kind === 'gm-notify') {
           const body = gmNote ?? `${playerName} reached ${checkpointName}`;
           await Promise.allSettled([
-            sendArrivalPushNotifications(gmTokens, gmNote ? '⚖️ Trap withheld' : '📍 Arrival Alert', body),
+            sendClassPush(gmRecipients, 'arrival', gmNote ? '⚖️ Trap withheld' : '📍 Arrival Alert', body, 'arrivals'),
             sendArrivalSMS(gmPhones, body),
           ]);
           return;
@@ -1289,9 +1318,10 @@ export const onLocationUpdate = functions
           playerName,
           crossingPlayerId: userId,
           crossingPlayerToken: playerFcmToken,
-          gmTokens,
+          crossingPlayerMuted: member.mutedNotifications ?? null,
+          gmRecipients,
           gmPhones,
-          allPlayerTokens,
+          allPlayerRecipients,
         });
       })
     );
@@ -1318,19 +1348,34 @@ async function dispatchCheckpointEvent(args: {
   playerName: string;
   crossingPlayerId: string;
   crossingPlayerToken?: string;
-  gmTokens: string[];
+  /** #87: the crossing player's own mute preferences, from the #16 member cache. */
+  crossingPlayerMuted?: string[] | null;
+  gmRecipients: PushRecipient[];
   gmPhones: string[];
-  allPlayerTokens: string[];
+  allPlayerRecipients: PushRecipient[];
 }): Promise<void> {
   const { gameId, event, checkpointName, playerName } = args;
   const title = KIND_TITLES[event.kind] ?? '📍 Checkpoint';
   const body = event.message || `${KIND_TITLES[event.kind]} at ${checkpointName}`;
+  /**
+   * #87: which mute class this event's pushes belong to. Classed by the *effect* kind, so a
+   * GM who has muted boons still hears about hazards. `gm-notify` never reaches this
+   * function (it is handled on the bare-arrival path above), but the union includes it, so
+   * it maps onto `arrival` rather than being asserted away.
+   */
+  const pushClass: NotificationClass =
+    event.kind === 'hazard' ? 'hazard'
+      : event.kind === 'boon' ? 'boon'
+        : event.kind === 'notify' ? 'gm-message'
+          : 'arrival';
   const audience = resolveAudience(event);
   const db = admin.firestore();
 
   const gmBody = `${playerName} ${KIND_VERBS[event.kind]} at ${checkpointName}`;
   const work: Promise<unknown>[] = [
-    sendArrivalPushNotifications(args.gmTokens, '⚡ Event triggered', gmBody),
+    // #87: the GM alert for a fired event is classed by the effect kind, so a GM who has
+    // muted boons still hears about hazards.
+    sendClassPush(args.gmRecipients, pushClass, '⚡ Event triggered', gmBody, 'arrivals'),
     sendArrivalSMS(args.gmPhones, gmBody),
   ];
 
@@ -1350,7 +1395,7 @@ async function dispatchCheckpointEvent(args: {
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       })
     );
-    work.push(sendPushToTokens(args.allPlayerTokens, title, body, 'broadcasts'));
+    work.push(sendClassPush(args.allPlayerRecipients, pushClass, title, body, 'broadcasts'));
   } else {
     work.push(
       db.collection('games').doc(gameId).collection('broadcasts').add({
@@ -1363,7 +1408,11 @@ async function dispatchCheckpointEvent(args: {
       })
     );
     if (args.crossingPlayerToken) {
-      work.push(sendPushToTokens([args.crossingPlayerToken], title, body, 'broadcasts'));
+      work.push(sendClassPush(
+        [{ fcmToken: args.crossingPlayerToken, mutedNotifications: args.crossingPlayerMuted }],
+        pushClass,
+        title, body, 'broadcasts'
+      ));
     }
   }
 

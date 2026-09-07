@@ -11,6 +11,7 @@ import type {
   GameMember,
   PlayerLocation,
   Arrival,
+  EntryTrip,
   GamePhase,
   Broadcast,
   RationSubmission,
@@ -34,6 +35,14 @@ interface GameContextValue {
    */
   playerLocations: StabilizedLocation[];
   arrivals: Arrival[];
+  /**
+   * Runbook entries that actually fired, per player (GM only, #67/#73).
+   *
+   * #83: this is the mobile GM feed's "alerts" half — the authoritative record of what
+   * genuinely pushed. A bare crossing writes an `arrival` and stays silent, so a feed built
+   * from `arrivals` alone shows the GM a list that does not match their phone.
+   */
+  entryTrips: EntryTrip[];
   /** GM→player messages. Players see only global + their own targeted messages. */
   broadcasts: Broadcast[];
   /** Ration submissions awaiting/holding GM review (GM only). */
@@ -68,6 +77,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     if (typeof max === 'number') stabilizer.current.setMaxAccuracy(max);
   }, [game]);
   const [arrivals, setArrivals] = useState<Arrival[]>([]);
+  const [entryTrips, setEntryTrips] = useState<EntryTrip[]>([]);
   const [broadcasts, setBroadcasts] = useState<Broadcast[]>([]);
   const [rations, setRations] = useState<RationSubmission[]>([]);
   const [scheduledEvents, setScheduledEvents] = useState<ScheduledEvent[]>([]);
@@ -88,6 +98,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     setPlayerLocations([]);
     stabilizer.current.reset(); // #82 — don't carry one game's positions into the next
     setArrivals([]);
+    setEntryTrips([]);
     setBroadcasts([]);
     setRations([]);
     setScheduledEvents([]);
@@ -174,6 +185,22 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
         (err: Error) => console.error('[GameContext] arrivals listener error', err)
       );
   }, [gameId]);
+
+  // Entry trips (GM only, #67/#73) — the authoritative log of runbook entries that FIRED.
+  // #83: the mobile GM feed's alerts half. A bare crossing writes an arrival and stays
+  // silent, so a feed built from arrivals alone contradicts the GM's own phone.
+  useEffect(() => {
+    if (!gameId || myRole !== 'gm') return;
+    return onSnapshot(
+      query(
+        collection(db, Collections.GAMES, gameId, Collections.ENTRY_TRIPS),
+        orderBy('trippedAt', 'desc'),
+        limit(100)
+      ),
+      (snap: QuerySnapshot) => setEntryTrips(snap.docs.map((d) => ({ id: d.id, ...d.data() } as EntryTrip))),
+      (err: Error) => console.error('[GameContext] entryTrips listener error', err)
+    );
+  }, [gameId, myRole]);
 
   // Subscribe to broadcasts. GMs see every message; players see global messages
   // (targetPlayerId == null) plus ones targeted at them. Firestore can't OR those
@@ -279,7 +306,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <GameContext.Provider
-      value={{ game, phase: gamePhase(game), myRole, checkpoints, runbookEntries, members, playerLocations, arrivals, broadcasts, rations, scheduledEvents, markers, loadGame, clearGame }}
+      value={{ game, phase: gamePhase(game), myRole, checkpoints, runbookEntries, members, playerLocations, arrivals, entryTrips, broadcasts, rations, scheduledEvents, markers, loadGame, clearGame }}
     >
       {children}
     </GameContext.Provider>

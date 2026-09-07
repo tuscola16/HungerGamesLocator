@@ -10,7 +10,7 @@ interface AuthContextValue {
   profile: UserProfile | null;
   loading: boolean;
   signOut: () => Promise<void>;
-  updateProfile: (updates: Partial<Pick<UserProfile, 'displayName' | 'fcmToken'>>) => Promise<void>;
+  updateProfile: (updates: Partial<Pick<UserProfile, 'displayName' | 'fcmToken' | 'mutedNotifications'>>) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -66,7 +66,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await auth.signOut();
   }
 
-  async function updateProfile(updates: Partial<Pick<UserProfile, 'displayName' | 'fcmToken'>>) {
+  async function updateProfile(updates: Partial<Pick<UserProfile, 'displayName' | 'fcmToken' | 'mutedNotifications'>>) {
     if (!user) return;
     await updateDoc(doc(db, Collections.USERS, user.uid), updates);
     setProfile((prev) => (prev ? { ...prev, ...updates } : prev));

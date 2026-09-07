@@ -1,6 +1,6 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { sendPushToTokens } from './notifications';
+import { sendClassPush, type NotificationClass, type PushRecipient } from './notifications';
 import { projectMarker } from './markers';
 import type { CheckpointDoc } from './markers';
 
@@ -25,14 +25,18 @@ const KIND_TITLES: Record<CheckpointKind, string> = {
   'gm-notify': '📍 Update',
 };
 
-/** All GM FCM tokens for a game. */
-async function getGmTokens(db: admin.firestore.Firestore, gameId: string): Promise<string[]> {
+/** #87: all GMs as push recipients, carrying their mute lists. */
+async function getGmRecipients(db: admin.firestore.Firestore, gameId: string): Promise<PushRecipient[]> {
   const snap = await db
     .collection('games').doc(gameId).collection('members')
     .where('role', '==', 'gm').get();
   return snap.docs
-    .map((d) => d.data().fcmToken as string | undefined)
-    .filter((t): t is string => !!t);
+    .map((d) => d.data())
+    .filter((m) => !!m.fcmToken)
+    .map((m) => ({
+      fcmToken: m.fcmToken as string,
+      mutedNotifications: (m.mutedNotifications as string[] | undefined) ?? null,
+    }));
 }
 
 export const fireRunbookEntry = functions.https.onCall(async (data, context) => {
@@ -84,6 +88,16 @@ export const fireRunbookEntry = functions.https.onCall(async (data, context) => 
 
   const title = KIND_TITLES[effect.kind] ?? '📍 Update';
   const body = effect.message || title;
+  // #87: classed by the effect kind, so a GM who muted boons still hears about hazards.
+  const pushClass: NotificationClass =
+    effect.kind === 'hazard' ? 'hazard'
+      : effect.kind === 'boon' ? 'boon'
+        : effect.kind === 'notify' ? 'gm-message'
+          : 'arrival';
+  const asRecipient = (m: { data: admin.firestore.DocumentData }): PushRecipient => ({
+    fcmToken: m.data.fcmToken as string | undefined,
+    mutedNotifications: (m.data.mutedNotifications as string[] | undefined) ?? null,
+  });
 
   // Resolve recipients: explicit targets, else every living player.
   const membersSnap = await gameRef.collection('members').get();
@@ -123,8 +137,7 @@ export const fireRunbookEntry = functions.https.onCall(async (data, context) => 
 
   if (effect.kind === 'gm-notify') {
     // GM-only: no player-facing broadcast; just confirm to the GMs.
-    const gmTokens = await getGmTokens(db, gameId);
-    work.push(sendPushToTokens(gmTokens, title, body, 'arrivals'));
+    work.push(sendClassPush(await getGmRecipients(db, gameId), pushClass, title, body, 'arrivals'));
   } else if (targetPlayerIds == null && effect.kind === 'notify' && effect.audience === 'all-players') {
     // A true all-players announcement → one global broadcast.
     work.push(
@@ -137,10 +150,7 @@ export const fireRunbookEntry = functions.https.onCall(async (data, context) => 
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       })
     );
-    const tokens = recipients
-      .map((m) => m.data.fcmToken as string | undefined)
-      .filter((t): t is string => !!t);
-    work.push(sendPushToTokens(tokens, title, body, 'broadcasts'));
+    work.push(sendClassPush(recipients.map(asRecipient), pushClass, title, body, 'broadcasts'));
   } else {
     // Targeted delivery: one broadcast + push per recipient.
     for (const m of recipients) {
@@ -154,8 +164,7 @@ export const fireRunbookEntry = functions.https.onCall(async (data, context) => 
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         })
       );
-      const token = m.data.fcmToken as string | undefined;
-      if (token) work.push(sendPushToTokens([token], title, body, 'broadcasts'));
+      if (m.data.fcmToken) work.push(sendClassPush([asRecipient(m)], pushClass, title, body, 'broadcasts'));
     }
   }
 

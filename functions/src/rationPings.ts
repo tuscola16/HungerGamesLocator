@@ -1,6 +1,6 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { sendPushToTokens } from './notifications';
+import { sendClassPush, type PushRecipient } from './notifications';
 
 // Reliable ration-window-open push (ROADMAP #72). The client schedules a *local*
 // notification for each window (`hooks/useRationReminders.ts`), but a dozing/locked phone
@@ -67,10 +67,11 @@ export const rationPings = functions.pubsub.schedule('every 1 minutes').onRun(as
       });
       if (!claimed) return;
 
-      const tokens = await getLivingPlayerTokens(db, gameDoc.id);
-      if (tokens.length === 0) return;
-      await sendPushToTokens(
-        tokens,
+      const recipients = await getLivingPlayerRecipients(db, gameDoc.id);
+      if (recipients.length === 0) return;
+      await sendClassPush(
+        recipients,
+        'ration',
         '🍖 Ration window open',
         'Photograph your ration card before the window closes — or you starve.',
         'broadcasts'
@@ -81,15 +82,17 @@ export const rationPings = functions.pubsub.schedule('every 1 minutes').onRun(as
   return null;
 });
 
-/** All living (non-out) player FCM tokens for a game. */
-async function getLivingPlayerTokens(
+/** #87: all living (non-out) players as push recipients, carrying their mute lists. */
+async function getLivingPlayerRecipients(
   db: admin.firestore.Firestore,
   gameId: string
-): Promise<string[]> {
+): Promise<PushRecipient[]> {
   const snap = await db.collection('games').doc(gameId).collection('members').get();
   return snap.docs
     .map((d) => d.data())
-    .filter((m) => m.role !== 'gm' && !m.out)
-    .map((m) => m.fcmToken as string | undefined)
-    .filter((t): t is string => !!t);
+    .filter((m) => m.role !== 'gm' && !m.out && !!m.fcmToken)
+    .map((m) => ({
+      fcmToken: m.fcmToken as string,
+      mutedNotifications: (m.mutedNotifications as string[] | undefined) ?? null,
+    }));
 }

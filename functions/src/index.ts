@@ -18,3 +18,4 @@ export { rearmCheckpoint } from './rearm';
 export { onGameStartProjectMarkers } from './markers';
 export { onGameMediaWrite } from './media';
 export { sweepOrphanedGames } from './orphans';
+export { onUserPrefsWrite } from './prefs';

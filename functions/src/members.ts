@@ -1,10 +1,12 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { sendPushToTokens } from './notifications';
+import { sendPushToTokens, sendClassPush } from './notifications';
 import { sendArrivalSMS, TWILIO_SECRETS } from './sms';
 
 interface MemberData {
   userId?: string;
+  /** #87: push classes this member never wants. */
+  mutedNotifications?: string[];
   role?: 'player' | 'gm';
   displayName?: string;
   fcmToken?: string;
@@ -91,8 +93,12 @@ async function handleDeath(
     return true;
   });
   if (posted) {
-    const livingTokens = livingNonGm.map((m) => m.fcmToken).filter((t): t is string => !!t);
-    await sendPushToTokens(livingTokens, '☠️ A tribute has fallen', `${livingCount} remaining`, 'broadcasts');
+    // #87: the toll is a mutable class — it fires on every death and some players would
+    // rather find out in person.
+    await sendClassPush(
+      livingNonGm.map((m) => ({ fcmToken: m.fcmToken, mutedNotifications: m.mutedNotifications })),
+      'death', '☠️ A tribute has fallen', `${livingCount} remaining`, 'broadcasts'
+    );
   }
 
   // Winner detection only kicks in once the field could plausibly be at the threshold;
@@ -205,6 +211,9 @@ async function handleSos(
     (m) => m.role !== 'gm' && m.out === true && m.userId !== player.userId
   );
 
+  // #87: SOS is deliberately still `sendPushToTokens`, not `sendClassPush`. A safety alert
+  // is not mutable, and routing it through the class filter at all would make that a matter
+  // of one string being right rather than of the code having no way to drop it.
   const tokens = [...gms, ...deadPlayers].map((m) => m.fcmToken).filter((t): t is string => !!t);
   // SMS stays GM-only. It is the escalation channel of last resort (a muted or asleep phone,
   // Rule 25) and it costs real money per message; a dead player already has the push and is

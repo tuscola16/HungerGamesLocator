@@ -52,11 +52,49 @@ export interface MapBoundary {
   polygon?: { latitude: number; longitude: number }[];
 }
 
+/**
+ * The kinds of push this app sends (ROADMAP #87). The union is drawn from the actual call
+ * sites — `geofence.ts`, `broadcasts.ts`, `members.ts`, `rationPings.ts`, `runbook.ts`,
+ * `runsheet.ts`, `media.ts` — so muting a class mutes everything of that kind and nothing
+ * else.
+ */
+export type NotificationClass =
+  | 'arrival'    // a player reached a checkpoint and nothing fired (GM only)
+  | 'hazard'     // a hazard tripped
+  | 'boon'       // a boon found
+  | 'gm-message' // a GM broadcast or targeted message
+  | 'death'      // the tribute-has-fallen toll
+  | 'winner'     // the game was won
+  | 'ration'     // the eat-window opened / a ration needs review
+  | 'sos'        // a safety alert — NEVER mutable
+  | 'boundary'   // a player left the play area
+  | 'runsheet'   // a scheduled run-sheet action fired
+  | 'media';     // the post-game recap went up
+
+/**
+ * ROADMAP #87: classes this user never wants pushed, **in any game**. Preferences are
+ * per-user, not per-game — one setting that follows a GM into every game they run, and no
+ * game-level policy, so a GM can never mute on anyone else's behalf.
+ *
+ * `'sos'` is stripped on write and ignored on read: a safety alert is not mutable, and a
+ * muted-SOS state must not be expressible even if a client sends one. Everything else,
+ * including `'boundary'`, is the user's call — boundary-exit fires often enough to be noise
+ * and that judgement belongs to them.
+ */
+export const UNMUTABLE_NOTIFICATIONS: readonly NotificationClass[] = ['sos'];
+
+/** Strip the classes that may never be muted. Used on every write path, both shells. */
+export function sanitizeMutedNotifications(classes: NotificationClass[]): NotificationClass[] {
+  return classes.filter((c) => !UNMUTABLE_NOTIFICATIONS.includes(c));
+}
+
 export interface UserProfile {
   id: string;
   email: string;
   displayName: string;
   fcmToken?: string;
+  /** ROADMAP #87: push classes this user never wants, in any game. See the type. */
+  mutedNotifications?: NotificationClass[];
   createdAt: FsTimestamp;
 }
 
@@ -856,6 +894,21 @@ export interface GameMember {
   displayName: string;
   email: string;
   fcmToken?: string;
+  /**
+   * ROADMAP #87: denormalized copy of `UserProfile.mutedNotifications`, written at join and
+   * refreshed whenever the profile setting changes — exactly the pattern `fcmToken` already
+   * follows.
+   *
+   * The preference lives on `users/{uid}`, but the push path resolves tokens from **member**
+   * docs and never touches user profiles. Copying it here keeps the send path a member read,
+   * riding the existing short-TTL member cache (#16).
+   *
+   * > This partially reverses #83's optimization, which moved the push path to short-circuit
+   * > *before* reading GM member docs. Filtering by preference needs them again — hence the
+   * > cache, and hence keeping the trip-gate first: a crossing that fires nothing still costs
+   * > no reads, and only a notification that was going to be sent pays for the check.
+   */
+  mutedNotifications?: NotificationClass[];
   /** Player marked themselves out of the game (phase: play). */
   out?: boolean;
   outAt?: FsTimestamp | null;

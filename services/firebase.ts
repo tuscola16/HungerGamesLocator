@@ -68,4 +68,6 @@ export const Collections = {
   MARKERS: 'markers',
   /** #88: the player-readable roster projection. Server-written; never client-writable. */
   ROSTER: 'roster',
+  /** #67/#73: per-player/per-entry trip latches. GM-readable; the alerts feed (#83). */
+  ENTRY_TRIPS: 'entryTrips',
 } as const;

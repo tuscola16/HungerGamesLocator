@@ -1,6 +1,6 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { sendPushToTokens } from './notifications';
+import { sendClassPush, type NotificationClass, type PushRecipient } from './notifications';
 
 // #69: push player-facing broadcasts to closed/backgrounded phones.
 //
@@ -55,20 +55,35 @@ export const onBroadcastCreate = functions.firestore
     const db = admin.firestore();
     const membersCol = db.collection('games').doc(gameId).collection('members');
 
-    let tokens: string[] = [];
+    // #87: recipients, not bare tokens, so each member's mute preferences travel with
+    // their token. The class comes from the broadcast's own `kind`, so muting "death"
+    // silences the tolls without touching GM messages.
+    let recipients: PushRecipient[] = [];
     if (b.targetPlayerId) {
       const m = await membersCol.doc(b.targetPlayerId).get();
       const t = m.data()?.fcmToken as string | undefined;
-      if (t) tokens = [t];
+      if (t) {
+        recipients = [{
+          fcmToken: t,
+          mutedNotifications: (m.data()?.mutedNotifications as string[] | undefined) ?? null,
+        }];
+      }
     } else {
       // All living (non-out) players.
       const all = await membersCol.get();
-      tokens = all.docs
+      recipients = all.docs
         .map((d) => d.data())
-        .filter((m) => m.role !== 'gm' && !m.out)
-        .map((m) => m.fcmToken as string | undefined)
-        .filter((t): t is string => !!t);
+        .filter((m) => m.role !== 'gm' && !m.out && !!m.fcmToken)
+        .map((m) => ({
+          fcmToken: m.fcmToken as string,
+          mutedNotifications: (m.mutedNotifications as string[] | undefined) ?? null,
+        }));
     }
 
-    await sendPushToTokens(tokens, title, message, 'broadcasts');
+    const cls: NotificationClass =
+      b.kind === 'death' ? 'death'
+        : b.kind === 'winner' ? 'winner'
+          : b.kind === 'checkpoint-event' ? 'arrival'
+            : 'gm-message';
+    await sendClassPush(recipients, cls, title, message, 'broadcasts');
   });

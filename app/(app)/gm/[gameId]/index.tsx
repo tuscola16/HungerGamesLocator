@@ -42,7 +42,7 @@ const PHASE_LABEL: Record<string, string> = {
 
 export default function GMGameScreen() {
   const { gameId } = useLocalSearchParams<{ gameId: string }>();
-  const { game, phase, checkpoints, runbookEntries, members, playerLocations, arrivals, rations, markers, loadGame, clearGame } = useGame();
+  const { game, phase, checkpoints, runbookEntries, members, playerLocations, arrivals, entryTrips, rations, markers, loadGame, clearGame } = useGame();
   const { user } = useAuth();
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('map');
@@ -108,20 +108,25 @@ export default function GMGameScreen() {
     return () => { cancelled = true; };
   }, [phase, game?.boundary]);
 
-  // Haptic feedback + unseen badge on new arrivals
+  // Haptic feedback + unseen badge on new ALERTS (#83).
+  //
+  // This counted `arrivals.length`, so it incremented — and buzzed — for crossings that
+  // never pushed anything, which is exactly the noise #83 removed from the push path. It
+  // now counts `entryTrips`: what actually fired. The badge then means "there is something
+  // here that alerted you", which is the only reading that makes it worth glancing at.
   useEffect(() => {
-    if (arrivals.length > prevArrivalsRef.current) {
+    if (entryTrips.length > prevArrivalsRef.current) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
     }
-    prevArrivalsRef.current = arrivals.length;
+    prevArrivalsRef.current = entryTrips.length;
 
     if (tab === 'alerts') {
-      setLastSeenArrivals(arrivals.length);
+      setLastSeenArrivals(entryTrips.length);
       setNewAlertCount(0);
     } else {
-      setNewAlertCount(Math.max(0, arrivals.length - lastSeenArrivals));
+      setNewAlertCount(Math.max(0, entryTrips.length - lastSeenArrivals));
     }
-  }, [arrivals.length, tab]);
+  }, [entryTrips.length, tab]);
 
   useEffect(() => {
     return onForegroundMessage(() => {});
@@ -765,7 +770,7 @@ export default function GMGameScreen() {
                 onCheckpointPress={placingRally ? undefined : handleCheckpointPress}
               />
             ) : (
-              <View style={styles.alertContainer}><AlertFeed arrivals={arrivals} /></View>
+              <View style={styles.alertContainer}><AlertFeed arrivals={arrivals} entryTrips={entryTrips} /></View>
             )}
           </View>
 

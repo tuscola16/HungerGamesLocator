@@ -1,6 +1,6 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { sendPushToTokens } from './notifications';
+import { sendClassPush, type PushRecipient } from './notifications';
 import { projectMarker, resolveRevealAudience, CheckpointDoc } from './markers';
 
 // The run-sheet (ROADMAP #11): a GM authors timed actions on
@@ -112,9 +112,9 @@ async function executeAction(
         ? { revealedTo: admin.firestore.FieldValue.arrayUnion(...audience) }
         : {}),
     });
-    const gmTokens = await getGmTokens(db, gameId);
-    await sendPushToTokens(
-      gmTokens,
+    await sendClassPush(
+      await getGmRecipients(db, gameId),
+      'runsheet',
       '👁️ Marker revealed',
       `${cp.name ?? 'A site'} is now visible to players.`
     );
@@ -123,8 +123,9 @@ async function executeAction(
 
   // GM-only nudge — push to GMs, no player-facing broadcast.
   if (ev.type === 'gm-reminder') {
-    const gmTokens = await getGmTokens(db, gameId);
-    await sendPushToTokens(gmTokens, '⏰ Reminder', ev.message || 'Run-sheet reminder');
+    await sendClassPush(
+      await getGmRecipients(db, gameId), 'runsheet', '⏰ Reminder', ev.message || 'Run-sheet reminder'
+    );
     return;
   }
 
@@ -145,9 +146,9 @@ async function executeAction(
     pushed: true, // #69: pushed below, so onBroadcastCreate skips it
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
-  const tokens = await getLivingPlayerTokens(db, gameId);
-  await sendPushToTokens(
-    tokens,
+  await sendClassPush(
+    await getLivingPlayerRecipients(db, gameId),
+    'gm-message',
     ev.type === 'gear-drop' ? '🎁 Gear drop' : '📢 Announcement',
     message,
     'broadcasts'
@@ -155,7 +156,7 @@ async function executeAction(
 }
 
 /** All GM FCM tokens for a game. */
-async function getGmTokens(db: admin.firestore.Firestore, gameId: string): Promise<string[]> {
+async function getGmRecipients(db: admin.firestore.Firestore, gameId: string): Promise<PushRecipient[]> {
   const snap = await db
     .collection('games')
     .doc(gameId)
@@ -163,21 +164,27 @@ async function getGmTokens(db: admin.firestore.Firestore, gameId: string): Promi
     .where('role', '==', 'gm')
     .get();
   return snap.docs
-    .map((d) => d.data().fcmToken as string | undefined)
-    .filter((t): t is string => !!t);
+    .map((d) => d.data())
+    .filter((m) => !!m.fcmToken)
+    .map((m) => ({
+      fcmToken: m.fcmToken as string,
+      mutedNotifications: (m.mutedNotifications as string[] | undefined) ?? null,
+    }));
 }
 
-/** All living (non-out) player FCM tokens for a game. */
-async function getLivingPlayerTokens(
+/** #87: all living (non-out) players as push recipients, carrying their mute lists. */
+async function getLivingPlayerRecipients(
   db: admin.firestore.Firestore,
   gameId: string
-): Promise<string[]> {
+): Promise<PushRecipient[]> {
   const snap = await db.collection('games').doc(gameId).collection('members').get();
   return snap.docs
     .map((d) => d.data())
-    .filter((m) => m.role !== 'gm' && !m.out)
-    .map((m) => m.fcmToken as string | undefined)
-    .filter((t): t is string => !!t);
+    .filter((m) => m.role !== 'gm' && !m.out && !!m.fcmToken)
+    .map((m) => ({
+      fcmToken: m.fcmToken as string,
+      mutedNotifications: (m.mutedNotifications as string[] | undefined) ?? null,
+    }));
 }
 
 /** Count of living (non-out) players. */

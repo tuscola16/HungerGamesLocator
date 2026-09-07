@@ -1,6 +1,6 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { sendPushToTokens } from './notifications';
+import { sendClassPush } from './notifications';
 
 /**
  * Player-armed traps (ROADMAP #97) — the arming half.
@@ -186,10 +186,16 @@ export const armPlayerTrap = functions.https.onCall(async (data, context) => {
     }),
     (async () => {
       const gms = await gameRef.collection('members').where('role', '==', 'gm').get();
-      const tokens = gms.docs
-        .map((d) => d.data().fcmToken as string | undefined)
-        .filter((t): t is string => !!t);
-      await sendPushToTokens(tokens, 'Trap armed', `${armedName} set a trap at ${site.name}`, 'arrivals');
+      const recipients = gms.docs
+        .map((d) => d.data())
+        .filter((m) => !!m.fcmToken)
+        .map((m) => ({
+          fcmToken: m.fcmToken as string,
+          mutedNotifications: (m.mutedNotifications as string[] | undefined) ?? null,
+        }));
+      // #87: classed as a GM message — a GM running a game without trap kits never sees one
+      // of these anyway, and one who does can mute the class with the rest of the chatter.
+      await sendClassPush(recipients, 'gm-message', 'Trap armed', `${armedName} set a trap at ${site.name}`, 'arrivals');
     })(),
   ]);
 

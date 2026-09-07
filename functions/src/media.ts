@@ -1,6 +1,6 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { sendPushToTokens } from './notifications';
+import { sendClassPush } from './notifications';
 
 // Post-game media notification (ROADMAP #45). When a GM attaches a YouTube recap and/or a
 // Google Photos album to a finished game (game-doc `media` field), this trigger tells
@@ -49,10 +49,14 @@ export const onGameMediaWrite = functions.firestore
 
     // Push every member (players + co-GMs) except the GM who set the media.
     const membersSnap = await db.collection('games').doc(gameId).collection('members').get();
-    const tokens = membersSnap.docs
-      .filter((d) => d.id !== setterId)
-      .map((d) => d.data().fcmToken as string | undefined)
-      .filter((t): t is string => !!t);
+    // #87: `media` is its own mute class — a recap notice weeks after a game is exactly
+    // the sort of thing somebody might not want.
+    const recipients = membersSnap.docs
+      .filter((d) => d.id !== setterId && !!d.data().fcmToken)
+      .map((d) => ({
+        fcmToken: d.data().fcmToken as string,
+        mutedNotifications: (d.data().mutedNotifications as string[] | undefined) ?? null,
+      }));
 
-    await sendPushToTokens(tokens, '🎬 Recap is up', message, 'broadcasts');
+    await sendClassPush(recipients, 'media', '🎬 Recap is up', message, 'broadcasts');
   });

@@ -1,5 +1,44 @@
 import * as admin from 'firebase-admin';
 
+/**
+ * ROADMAP #87: the kinds of push this app sends. Mirrors `NotificationClass` in
+ * types/index.ts (functions/ can't import the shared types).
+ */
+export type NotificationClass =
+  | 'arrival' | 'hazard' | 'boon' | 'gm-message' | 'death' | 'winner'
+  | 'ration' | 'sos' | 'boundary' | 'runsheet' | 'media';
+
+/** A push target and the classes they've muted. Read off the member doc (#87). */
+export interface PushRecipient {
+  fcmToken?: string | null;
+  mutedNotifications?: string[] | null;
+}
+
+/**
+ * Send a class of push to a set of recipients, **honoring each one's mute preferences**
+ * (ROADMAP #87).
+ *
+ * The filter is server-side because muting has to work while the app is closed — a
+ * client-side filter would only ever hide a banner that had already buzzed the phone.
+ *
+ * **`'sos'` is never filtered.** A safety alert is not mutable, and this is the enforcement
+ * that makes that true regardless of what any client wrote: even a member doc that somehow
+ * carries `'sos'` in its muted list still gets the alert.
+ */
+export async function sendClassPush(
+  recipients: PushRecipient[],
+  cls: NotificationClass,
+  title: string,
+  body: string,
+  channelId = 'arrivals'
+): Promise<void> {
+  const tokens = recipients
+    .filter((r) => cls === 'sos' || !(r.mutedNotifications ?? []).includes(cls))
+    .map((r) => r.fcmToken)
+    .filter((t): t is string => !!t);
+  await sendPushToTokens(tokens, title, body, channelId);
+}
+
 /** Send a high-priority push to a set of FCM tokens. Logs (does not throw) on
  * failure so callers can fire-and-forget. `channelId` selects the Android channel. */
 export async function sendPushToTokens(
