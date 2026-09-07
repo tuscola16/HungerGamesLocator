@@ -15,6 +15,7 @@ import { AlertOverlay } from '@/components/AlertOverlay';
 import { LobbyPermissions } from '@/components/LobbyPermissions';
 import { RationPanel } from '@/components/RationPanel';
 import { PostGameMedia } from '@/components/PostGameMedia';
+import { PlayerRoster } from '@/components/PlayerRoster';
 import { Tutorial } from '@/components/Tutorial';
 import { BroadcastsProvider } from '@/context/BroadcastsContext';
 import { DiedOverlay } from '@/components/DiedOverlay';
@@ -913,6 +914,14 @@ export default function PlayerGameScreen() {
         <View style={styles.waitSosWrap}>{renderSosButton()}</View>
         {/* Ask for every permission now, in the lobby, instead of mid-game. */}
         {phase === 'lobby' && <LobbyPermissions rationsEnabled={config.rationsEnabled} />}
+        {/* #88: the roster is available in every phase, and the lobby is where it answers
+            the most natural question — who else is here yet? */}
+        {roster.length > 0 && (
+          <View style={styles.waitFeed}>
+            <Text style={styles.feedHeading}>IN THE FIELD ({roster.length})</Text>
+            <PlayerRoster roster={roster} selfId={user?.uid} />
+          </View>
+        )}
         {gameId ? (
           <View style={styles.waitFeed}>
             <BroadcastFeed gameId={gameId} max={10} scroll={false} />
@@ -1119,6 +1128,14 @@ export default function PlayerGameScreen() {
                 </>
               )}
 
+              {/* #88: who's left. Names only — the projection carries nothing else, and a
+                  dead player leaves the list rather than being shown as dead, so it never
+                  becomes a scoreboard of who to hunt. */}
+              <Text style={styles.feedHeading}>
+                STILL IN THE FIELD ({roster.length})
+              </Text>
+              <PlayerRoster roster={roster} selfId={user?.uid} />
+
               <Text style={styles.feedHeading}>Messages</Text>
               <BroadcastFeed gameId={gameId!} scroll={false} />
             </ScrollView>
@@ -1144,7 +1161,7 @@ export default function PlayerGameScreen() {
     // for both the auto (last-death) and manual (GM End Game) paths.
     const iWon = !!winnerId && winnerId === user?.uid;
     return (
-      <View style={styles.centerBody}>
+      <ScrollView contentContainerStyle={styles.resultsScroll}>
         <View style={styles.waitIcon}>
           <Ionicons name={iWon ? 'trophy' : 'flag'} size={44} color={Colors.primary} />
         </View>
@@ -1157,6 +1174,17 @@ export default function PlayerGameScreen() {
         ) : (
           <Text style={styles.waitSub}>That's how long you played, {displayName || 'Player'}. Nice work!</Text>
         )}
+        {/* #88: the standing — everyone who played, longest run first. This is the results
+            table the roster projection exists to make possible; players can't read each
+            other's member docs, so the times ride on the projection. #91 keeps a player who
+            was promoted to GM mid-game in it, with their run frozen at the promotion rather
+            than erased along with their role. */}
+        {roster.length > 0 && (
+          <View style={{ alignSelf: 'stretch', marginTop: 24 }}>
+            <Text style={styles.feedHeading}>HOW EVERYONE FINISHED</Text>
+            <PlayerRoster roster={roster} standings selfId={user?.uid} winnerId={winnerId} />
+          </View>
+        )}
         {(media?.youtubeUrl || media?.photosAlbumUrl) && (
           <View style={{ alignSelf: 'stretch', marginTop: 16 }}>
             <PostGameMedia media={media} />
@@ -1164,7 +1192,7 @@ export default function PlayerGameScreen() {
         )}
         <View style={{ height: 24 }} />
         <Button title="Back to My Games" onPress={() => router.replace('/(app)/games')} />
-      </View>
+      </ScrollView>
     );
   }
 
@@ -1232,6 +1260,12 @@ const styles = StyleSheet.create({
 
   // Waiting / results
   centerBody: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 12 },
+  // #88: results grew a standings table, so it scrolls now — a 12-player field doesn't fit
+  // under the trophy on a phone.
+  resultsScroll: {
+    flexGrow: 1, alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 24, paddingVertical: 32, gap: 12,
+  },
   waitScroll: { flex: 1 },
   waitContent: { flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, paddingVertical: 24, gap: 12 },
   waitIcon: {

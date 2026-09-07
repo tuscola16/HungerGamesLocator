@@ -789,6 +789,26 @@ export interface GameMember {
    * solo/legacy games.
    */
   district?: string | number;
+  /**
+   * ROADMAP #91: set true the moment this member first holds the player role, and **never
+   * cleared**. Results are computed from *current* membership, so a player promoted to GM
+   * mid-game — the "I died, now I'm helping" path — used to vanish from the standings along
+   * with the run they earned. This is what keeps them in it.
+   *
+   * Written server-side by `onMemberWriteProjectRoster`; absent on pre-#91 members, which
+   * the projection reads as "trust the current role", i.e. the old behavior.
+   */
+  everPlayer?: boolean;
+  /**
+   * ROADMAP #91: the run, frozen when they stop being a player — eliminated, tapped out,
+   * or promoted. Server-written. `durationMs` is measured from the game's `startedAt`, so
+   * it is comparable across everyone in the standings.
+   */
+  playerRun?: {
+    outAt?: FsTimestamp | null;
+    ended?: PlayerRunEnd;
+    durationMs?: number;
+  };
   joinedAt: FsTimestamp;
 }
 
@@ -834,8 +854,25 @@ export interface RosterEntry {
    * During play the row's *absence* is what says "out", so this is never `true` then.
    */
   out?: boolean;
+  /**
+   * ROADMAP #91: how this player's run ended. Post-game only, and the reason a **promoted**
+   * player still appears in the standings — `'promoted'` marks the residual case #91 kept
+   * its number for.
+   */
+  ended?: PlayerRunEnd;
   updatedAt: FsTimestamp;
 }
+
+/**
+ * How a player's run finished (ROADMAP #91).
+ * - `eliminated` — a GM ended it (starvation, bad sport, …).
+ * - `out`        — they tapped out / self-reported (Rule 16).
+ * - `survived`   — still alive when the game closed.
+ * - `promoted`   — they became a GM mid-game. The residual case: results are computed from
+ *                  *current* membership, so without a frozen record a promotion erases the
+ *                  run someone earned.
+ */
+export type PlayerRunEnd = 'eliminated' | 'out' | 'survived' | 'promoted';
 
 export type EliminationCause =
   | 'self' // honor-system self-report (Rule 16)
