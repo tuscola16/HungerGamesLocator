@@ -1,6 +1,25 @@
 # Roadmap — Data Model & Schema Spec
 
-Implementation-ready detail for the **outstanding** [ROADMAP.md](ROADMAP.md) items, keyed by the
+> ## ⚠️ 2026-09-06b: everything below except **#86** is now built
+>
+> This file was written as a *specification*. As of the Tier 12 build it is largely a
+> **record**: #84, #87, #88, #90, #91, #96, #97, #99 and #100 are all implemented, and each
+> section now opens with a note saying whether it shipped as written and what the build
+> changed. The canonical schema is [types/index.ts](types/index.ts) — where the two disagree,
+> the code is right and this file is stale.
+>
+> **None of it is deployed and none of it has run.** See the deploy-order warning at the top
+> of [ROADMAP.md](ROADMAP.md), in particular that the `functions` deploy and the app build
+> must go out together: winner detection now advances a game into `phase: 'cleanup'`, which
+> no binary already in the field recognizes.
+>
+> New collections this batch added, for the `Collections` map and the rules: **`roster`**
+> (#88, player-readable projection, server-write-only). New callables: **`armPlayerTrap`**
+> (#97), **`undoDeleteGame`** (#90). New triggers: **`onMemberWriteProjectRoster`** /
+> **`onGamePhaseProjectRoster`** (#88/#91), **`onGameCleanupStart`** / **`onGameReopen`**
+> (#84), **`onUserPrefsWrite`** (#87), **`sweepDeletedGames`** (#90).
+
+Implementation-ready detail for the [ROADMAP.md](ROADMAP.md) items, keyed by the
 same item numbers. Everything here extends the existing types in
 [types/index.ts](types/index.ts) and the `Collections` map in
 [services/firebase.ts](services/firebase.ts); the built foundation (`GameConfig`, `Broadcast`,
@@ -154,6 +173,12 @@ movement, because Android batches step delivery and a locked phone's listener ne
 
 ## 84. `cleanup` phase + player-marked drop recovery
 
+> **Shipped 2026-09-06b, as specified**, with two additions the build turned up:
+> `Game.deletedAt`-style optionality was not needed, but **`gamePhase()` now clamps unknown
+> phases to the game's `status`** (the forward-compat decision this section asked for), and
+> **`winnerId`/`winnerName` are cleared server-side** by a new `onGameReopen` trigger rather
+> than being added to the GM's writable key set for the reversal path.
+
 The phase itself, plus the two projections that make a dark-arena recovery job possible: every
 drop visible to every player, and every person visible on the map.
 
@@ -243,6 +268,11 @@ still be written silently (they are already push-gated by #83).
 
 ## 87. GM notification mute
 
+> **Shipped 2026-09-06b, as specified.** The denormalization onto member docs is done by a new
+> `onUserPrefsWrite` trigger rather than by the join/create callables, which covers both
+> directions at once: a preference changed today reaches games joined last week. Push sites
+> resolve `PushRecipient`s and go through `sendClassPush`.
+
 **Decided 2026-09-06:** the target is the **GM's** alert volume, preferences are **per user** (they
 follow a GM into every game they run, not per game), **SOS is never mutable**, **boundary-exit
 explicitly is**, and there is no game-level policy — a GM cannot mute on anyone else's behalf.
@@ -288,6 +318,10 @@ guard), so a muted-SOS state cannot exist even if a client sends one. Everything
 
 ## 88. Player roster — living during play, standings afterwards
 
+> **Shipped 2026-09-06b, and it moved ahead of #99** — that item depends on it. The roster row
+> also carries `sos` (the one flag a rescue needs; #94 made the field the rescue crew) and,
+> post-game, `ended` from #91's frozen `playerRun`.
+
 Member docs carry `email` and `fcmToken`, so the roster cannot come from a relaxed rule on
 `members` — it needs a projection, exactly as `markers` projects checkpoints and `Game.winnerName`
 denormalizes the winner (#81).
@@ -316,6 +350,9 @@ which already fires on every membership change — no new trigger, no new fan-ou
 the same all-members re-projection as the results view, since recovery needs to know who is around.
 
 ## 90. Soft delete with a 20-minute undo
+
+> **Shipped 2026-09-06b, as specified.** `DELETE_UNDO_WINDOW_MS` is exported from
+> `types/index.ts` and mirrored in `functions/src/games.ts`.
 
 **Decided 2026-09-06:** **any GM** of the game may delete it (not only the creator), there is **no
 age requirement**, and it is a **soft delete with a 20-minute recovery window** — gone immediately
@@ -346,7 +383,13 @@ deleted from `results`.
 **The existing phase guard is relaxed, not removed.** `deleteGame` currently refuses anything that
 has started; it now accepts `results` as well. A game in `play` still cannot be deleted.
 
-## 91. "Was a player" — durable run record *(later tier, reduced by #99)*
+## 91. "Was a player" — durable run record *(built 2026-09-06b — the residual case only)*
+
+> **Shipped 2026-09-06b.** `everPlayer` + `playerRun` land exactly as sketched below, written
+> by the roster trigger *ahead of* the projection so it reads them in the same pass. One rule
+> the sketch didn't state: **the frozen run wins over anything recomputed**, because a promoted
+> member's doc no longer says `out` and recomputing would silently credit them the whole game.
+> A #21 revive drops the record so it can be re-frozen correctly when the run ends for real.
 
 > **Mostly absorbed — keep the number, expect not to build it.** #99 lets dead players spectate
 > *as players*, so the promotion that erased someone's run stops happening; **#88** now projects a
@@ -380,6 +423,11 @@ the deterministic death toll). The results screen reads it through the **#88 `ro
 ---
 
 ## 96. Targeted-but-unassigned runbook entries
+
+> **Shipped 2026-09-06b, as specified.** The resolution order is in `entryTargetsPlayer`, and
+> `common/runbook.ts` holds the single `isInertEntry` predicate the shells and the Start
+> preflight share with it — the agreement is the point, since the previous behaviour of an
+> unassigned targeted entry was to fire for *everyone*.
 
 `playerIds` cannot express "targeted, players not chosen yet": absent, `null` **and `[]` all mean
 *anyone*** — `functions/src/geofence.ts:108` returns true when the array is missing or empty, and
@@ -421,6 +469,16 @@ working. The existing per-player targeting is sufficient: no "any N players", no
 `cloneGame` (#65) **strips targets and marks the copy inert.**
 
 ## 97. Player-armed traps
+
+> **Shipped 2026-09-06b, as specified**, with one decision the section left open: the arming
+> callable resolves the **site itself** from the caller's last fix rather than taking a
+> `checkpointId`, so the arming UI is never handed a list of checkpoint coordinates. Disarming
+> also **re-issues a fresh code** — clearing `armedBy`/`armedAt` alone would leave the spent
+> card valid and the trap live at the player's chosen site. `endgame` counts as `play` for
+> arming, so a kit found in the last twenty minutes isn't stranded.
+>
+> **The `checkpointId` loosening had six consequences**, as warned: both `GameMap`s, both
+> runbook views, the run sheet and the checkpoints screen all assumed it was present.
 
 The GM pre-sets traps; a player finds a **physical trap kit** (a card) that names one of them and
 arms it where and when they choose. The player supplies only the *site* and the *exclusions* —
@@ -485,6 +543,12 @@ deliberately visible and reversible.
 > to arm a trap they never found.
 
 ## 99. Dead-player spectator map
+
+> **Shipped 2026-09-06b, as specified** — including the `outAt` server-clock prerequisite,
+> which was indeed a prerequisite and not a follow-up. One thing the section left implicit is
+> now explicit in the code: **an open SOS overrides the dead-player display filter** on every
+> map. Without that exception the filter and #94's rescue path contradict each other — the
+> crew is paged about someone the map refuses to draw.
 
 No new collection and no new role — a read-rule widening plus two config knobs, which is why it
 beats the "helper" role it replaces (#91). A dead player stays `role: 'player'`, `out: true`.
@@ -580,6 +644,12 @@ negligible, and it was never the constraint.
 
 ## 100. Geofence quality — Stonedam Day 2 retune
 
+> **2026-09-06b:** `config.locationTrail` now also spares `arrivals`, `checkpointTrips` and
+> `entryTrips` from `cleanupOnGameEnd`. The trail was already excluded, but it is
+> uninterpretable without them — which is how the Stonedam evidence was lost. One flag, one
+> intent, and no new exposure: the trail holds every fix, of which the arrival positions are a
+> strict subset. **The retention duty now covers all four.**
+
 Shipped 2026-09-06. Additive and optional throughout; a legacy game doc with none of these keys
 gets the new defaults, and a game that explicitly set one keeps its value. See
 [ROADMAP.md](ROADMAP.md) §100 for the field data each default was derived from.
@@ -632,27 +702,32 @@ collections. (Shipped no-schema items — 20–28, 48–56, 58's prerequisites, 
 [ROADMAP.md](ROADMAP.md) Built & removed callout and git history.)
 
 - **47** Maps-key restriction — Cloud Console ops task.
-- **85** ◐ *Roster list built 2026-09-06; detail screen outstanding.* GM per-player overflow menu — mobile UI only. **Every** action moves into the menu
-  (nothing stays inline), on the roster list *and* the player detail screen
-  (`app/(app)/gm/[gameId]/players.tsx`, `.../player/`).
+- **85** ✅ *Built 2026-09-06 (roster) + 2026-09-06b (detail).* GM per-player overflow menu —
+  mobile UI only; every action moved into the menu on both screens. Extracted to
+  `components/PlayerActionSheet.tsx` so the two can't drift, with `<DistrictEditorModal>` as a
+  parent-owned sibling (the roster's inline district chip opens the same editor).
 - **86** Server-authoritative game logic — *a spike with a prototype*. Any outcome would be a large
   schema change, so nothing is specified here yet. **Answer the OTA question first**: half the
   motivation is shipping a messaging change without a build, and `updates.enabled` is off by choice
   since 2026-06-19. Re-enabling it may retire that half outright.
-- **89** "You died" screen — client only, and **one screen for every cause** (self-reported, GM
+- **89** ✅ *Built 2026-09-06b.* "You died" screen — client only, and **one screen for every cause** (self-reported, GM
   elimination, starvation all read the same). It **blocks interaction until dismissed**, and behind
   it sits nothing but the #99 spectator map; the player still receives other players' death
   notifications. The toll broadcast keeps its `targetPlayerId: null` fan-out unchanged — everyone
   else's toll still names them — and the dying player suppresses only their own, by its
   deterministic `{userId}_death` id (#26). No new field.
-- **92** ◐ *Built 2026-09-06 (join deep-link param + web QR); mobile-phone QR blocked on the absent `react-native-svg` native module.* Join by QR — a `code` route param on `/join` + an `outdoorgm://` deep-link handler; scanning
+- **92** ✅ *Built 2026-09-06 (join deep-link param + web QR) + 2026-09-06b (the GM-phone QR).*
+  The native-module blocker was resolved by not having one: `common/qr.ts` computes the matrix
+  in pure TypeScript and `<QrCode>` draws it as plain Views, verified module-for-module
+  against the `qrcode` package over 227 payloads. Join by QR — a `code` route param on `/join` + an `outdoorgm://` deep-link handler; scanning
   turned out **not** to need the `expo-camera` scanner at all — the phone's own camera resolves the deep link. Adds a pure-JS QR *renderer*
   dependency for the GM side. No stored data and **no code rotation** — one code per game, unchanged.
   Displayed on the **GM phone and web dashboard only, never printed**, so the secret isn't left
   photographable. Scanning fills the code plus the scanner's own profile display name.
 - **93** ✅ *Built 2026-09-06.* Profile display-name autofocus — deleted one prop (`app/(app)/profile.tsx:86`). Layout
   stays as it is; no reordering.
-- **94** Safety alert surviving death — client + functions, no new fields. Three parts: keep the
+- **94** ✅ *Built 2026-09-06 (client) + 2026-09-06b (the rest) — **the function is still
+  undeployed**.* Safety alert surviving death — client + functions, no new fields. Three parts: keep the
   control visible in **every** state (it is the requirement — the option must never disappear);
   **lift the `!out` tracking gate** so a dead player keeps uploading (shared with #99), which makes
   the alert self-locating and retires the unused `sosLocation`/`coords` path
@@ -667,7 +742,8 @@ collections. (Shipped no-schema items — 20–28, 48–56, 58's prerequisites, 
   would mark a drop seen for everyone the first player looked at it. Discovery notifications already
   exist and are unchanged — this is purely the "visible since last look" styling. No GM-side view of
   who has seen what.
-- **98a** ✅ *Built 2026-09-06.* Web runbook filtering — `web/src/screens/RunbookScreen.tsx` UI only; every axis
+- **98a** ✅ *Built 2026-09-06; gained the #96 "needs players" axis 2026-09-06b. Still never
+  opened in a browser.* Web runbook filtering — `web/src/screens/RunbookScreen.tsx` UI only; every axis
   (`checkpointId`, `effect.kind`, `trigger`, `playerIds`, `revealOnFire`) is already on the entry.
   Filters **do not persist** between sessions.
 - **98b** ✅ *Built 2026-09-06.* Mobile runbook view — **no schema, but not small**: `app/(app)/gm/[gameId]/` has no
