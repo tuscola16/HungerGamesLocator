@@ -2,23 +2,30 @@ import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
 
 /**
- * Clean up a game's transient, location-bearing data when it ends — on the
- * `play → ended` transition. Two reasons:
- *   • **Ration photos** (Rules 6–9) only matter during play (they prove a player ate),
- *     so once the game is over there's nothing left to verify; clearing them keeps
- *     Storage from accumulating a season of meal photos.
+ * Clean up a game's transient, location-bearing data when it CLOSES — on the
+ * `status → 'ended'` transition.
+ *
  *   • **Location & arrival data** (#30) is a privacy/retention liability for a
  *     location-tracking app and would otherwise persist forever for every finished
  *     game. `locations/*` (each player's last GPS fix + name) and `arrivals/*`
  *     (checkpoint crossings with coordinates) are deleted here. Neither is shown on
  *     the results screens (which read member docs), so removing them is safe.
+ *   • **Ration photos** are *no longer* deleted here — see below.
  *
  * Doing this on the end transition (instead of a scheduled job) needs no Cloud
- * Scheduler. Games are only deletable before they start (see deleteGame), so an
- * ended game is the single path that can have leftover data to clear.
+ * Scheduler.
+ *
+ * > **#84 split this function in two.** It used to purge the ration photos *and* the
+ * > locations/arrivals on the same transition, but those now belong at different moments.
+ * > **Ration photos are deleted at victory** (entering `cleanup`, in `cleanupPhase.ts`) —
+ * > they have proved what they were going to prove. **Locations and arrivals survive until
+ * > close**, because finding people and drops in the dark is exactly what cleanup is for.
+ * > The winner stamp moved to the victory transition for the same reason; what remains here
+ * > is the fallback for a game closed **straight from `play`**, which is still a supported
+ * > path and the one an old client takes.
  *
  * NOTE: the function keeps its original deployed name to avoid orphaning a deployed
- * trigger, even though it now purges more than ration photos.
+ * trigger, even though it no longer purges ration photos at all.
  */
 export const cleanupRationPhotosOnGameEnd = functions.firestore
   .document('games/{gameId}')
@@ -56,14 +63,10 @@ export const cleanupRationPhotosOnGameEnd = functions.firestore
       endedAt: after?.endedAt ?? null,
     });
 
-    // #81: crown the last tribute standing on the MANUAL End Game path. Winner detection
-    // (members.ts) already stamps `winnerId` in its transaction when a death auto-ends the
-    // game; a GM tapping End Game with one player left does not, so fill it in here. Skip if
-    // it's already set (auto path handled it) so we never overwrite. This is a second write
-    // to the game doc, but `before.status === 'ended'` short-circuits the re-triggered run.
     // #81: crown the last tribute standing AND notify them. `winnerId` is stamped by winner
-    // detection (members.ts) in its transaction on the auto (last-death) path; on the manual GM
-    // End Game path we compute it here. Either way, send the winner a TARGETED push so they learn
+    // detection (members.ts) in its transaction on the auto (last-death) path, and by
+    // `onGameCleanupStart` (#84) when a GM opens recovery; on a game closed straight from
+    // play we compute it here. Either way, send the winner a TARGETED push so they learn
     // they won even on an OLDER app build that has no "YOU WON" results screen yet — the existing
     // onBroadcastCreate delivers it to just their device, and BroadcastsContext only surfaces a
     // targeted broadcast to its recipient, so it never leaks to the other players. All wrapped so
@@ -101,6 +104,10 @@ export const cleanupRationPhotosOnGameEnd = functions.firestore
     // All best-effort and independent — run in parallel. `force` on deleteFiles keeps
     // going past any individual error; absent photos/subcollections are fine.
     await Promise.allSettled([
+      // #84: ration photos are normally purged at *victory* (entering cleanup). This run is
+      // still here because a game may be closed straight from `play` and never pass through
+      // that transition — the delete is idempotent, so a game that did pass through it just
+      // finds nothing left.
       admin.storage().bucket().deleteFiles({ prefix: `games/${gameId}/rations/`, force: true }),
       // #42 arena overlay — a GM-uploaded image of up to 15 MB per game. Nothing renders it
       // after the game ends, and no other path deletes it, so without this every finished

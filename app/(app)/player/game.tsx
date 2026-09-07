@@ -31,7 +31,7 @@ import {
 } from '@/services/locationTask';
 import { requestBatteryOptimizationExemption } from '@/services/batteryOptimization';
 import {
-  eliminatePlayer, raiseSos, setDeathLocation, gamePhase, gameConfig, ENDGAME_RALLY_ID,
+  eliminatePlayer, raiseSos, setDeathLocation, setDropCleared, gamePhase, gameConfig, ENDGAME_RALLY_ID,
 } from '@/services/gameService';
 import { friendlyError } from '@/services/errorUtils';
 import { useElapsed, useRemaining, formatDuration } from '@/hooks/useElapsed';
@@ -241,6 +241,12 @@ export default function PlayerGameScreen() {
   // because a subscription opened during the countdown is denied outright rather than
   // queued, which would leave a permanently dead listener behind.
   // ---------------------------------------------------------------------------------
+  // #84: `cleanup` grants EVERY member mutual map visibility, dead or alive, straight from
+  // the rules — no spectator countdown, no GM opt-in. The recovery job is finding people
+  // and props in the dark, so the arena is simply lit. That means the live-locations
+  // listener attaches in cleanup for everyone, and the countdown/opt-in gate below applies
+  // only to the #99 spectator case during play.
+  const cleanupOpen = phase === 'cleanup';
   const spectatorPhase = phase === 'play' || phase === 'endgame' || phase === 'cleanup';
   const spectatorOffered = config.spectatorMapEnabled === true && out && spectatorPhase;
   const spectatorReadyAt = useMemo(() => {
@@ -251,7 +257,8 @@ export default function PlayerGameScreen() {
   // Derived, not stateful: `diagNow` already ticks every 2 s for the diagnostics card, and
   // 2 s granularity is ample for a 2-minute countdown. This keeps the gate a pure function
   // of (outAt, config, now) rather than a timer that can be left armed across a revive.
-  const spectatorLive = spectatorReadyAt != null && diagNow >= spectatorReadyAt;
+  const spectatorLive =
+    cleanupOpen || (spectatorReadyAt != null && diagNow >= spectatorReadyAt);
 
   // The roster projection (#88) — the ONLY roster a player may read, and during play it
   // holds exactly the living players. It is therefore both the filter ("which of these
@@ -319,9 +326,14 @@ export default function PlayerGameScreen() {
    */
   const visibleSpectatorLocations = useMemo(() => {
     if (!spectatorLive) return [];
+    const mine = (l: { userId: string }) => l.userId === user?.uid;
+    // #84: in cleanup, "everyone sees everyone" includes the GMs — who are the people most
+    // worth finding when you're the last one in the woods with a bag of props. The roster
+    // never lists GMs, so the allowlist is dropped here rather than widened.
+    if (cleanupOpen) return spectatorLocations.filter((l) => !mine(l));
     const allowed = new Set(roster.map((r) => r.userId));
-    return spectatorLocations.filter((l) => l.userId !== user?.uid && allowed.has(l.userId));
-  }, [spectatorLive, spectatorLocations, roster, user?.uid]);
+    return spectatorLocations.filter((l) => !mine(l) && allowed.has(l.userId));
+  }, [spectatorLive, cleanupOpen, spectatorLocations, roster, user?.uid]);
 
   /** #99: an open safety alert draws distinctly on every map that shows the player. */
   const sosUserIds = useMemo(
@@ -636,6 +648,16 @@ export default function PlayerGameScreen() {
     );
   }
 
+  /** #84: tick a drop off the recovery list, or untick a mis-tap. Anyone may do either. */
+  function toggleDropCleared(m: RevealedMarker) {
+    if (!gameId || !user) return;
+    setDropCleared(
+      gameId,
+      m.checkpointId,
+      m.clearedAt ? null : { userId: user.uid, displayName: displayName || 'A player' }
+    ).catch((err: unknown) => Alert.alert('Error', friendlyError(err)));
+  }
+
   function handleSos() {
     Alert.alert(
       'Send safety alert?',
@@ -681,6 +703,109 @@ export default function PlayerGameScreen() {
   }
 
   // --- Render per phase ---
+
+  /**
+   * Recovery (#84): the phase between "someone won" and "the game is closed".
+   *
+   * The arena is fully lit — every checkpoint is a marker, everyone's position is visible
+   * to everyone — because the job is collecting every prop off every site and accounting
+   * for every person still in the woods, usually in the dark. Players are *expected* to
+   * help if they're still around and never pushed about it; anyone who has gone home was
+   * deliberately not notified that this started.
+   *
+   * **Anyone may mark a drop cleared, not just whoever placed it** — the person standing at
+   * the site is the one who knows. A mis-tap in the dark undoes with another tap.
+   */
+  function renderCleanup() {
+    const drops = siteMarkers;
+    const cleared = drops.filter((m) => m.clearedAt).length;
+    const done = drops.length > 0 && cleared === drops.length;
+    return (
+      <>
+        <View style={styles.cleanupBanner}>
+          <Ionicons
+            name={done ? 'checkmark-circle' : 'basket-outline'}
+            size={18}
+            color={done ? Colors.success : Colors.primary}
+          />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.cleanupTitle}>
+              {winnerName ? `${winnerName} won — recovery` : 'Recovery'}
+            </Text>
+            <Text style={styles.cleanupSub}>
+              {done
+                ? 'Every drop is collected. Wait for your GM to close the game.'
+                : `${cleared} of ${drops.length} drop${drops.length === 1 ? '' : 's'} collected. Grab anything near you and tick it off.`}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.tabBar}>
+          <TouchableOpacity style={[styles.tab, playTab === 'map' && styles.activeTab]} onPress={() => setPlayTab('map')}>
+            <Ionicons name="map" size={18} color={playTab === 'map' ? Colors.primary : Colors.textSecondary} />
+            <Text style={[styles.tabText, playTab === 'map' && styles.activeTabText]}>Map</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.tab, playTab === 'stats' && styles.activeTab]} onPress={() => setPlayTab('stats')}>
+            <Ionicons name="list" size={18} color={playTab === 'stats' ? Colors.primary : Colors.textSecondary} />
+            <Text style={[styles.tabText, playTab === 'stats' && styles.activeTabText]}>Drops</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.playContent}>
+          {playTab === 'map' ? (
+            <View style={styles.mapFull}>
+              <GameMap
+                checkpoints={spectatorCheckpoints}
+                playerLocations={visibleSpectatorLocations}
+                sosUserIds={sosUserIds}
+                markers={siteMarkers}
+                rallyPoint={rallyPoint}
+                boundary={boundary}
+                mapOverlay={mapOverlay}
+                showsUserLocation
+              />
+            </View>
+          ) : (
+            <ScrollView style={styles.statsBody} contentContainerStyle={styles.statsContent}>
+              {drops.length === 0 ? (
+                <Text style={styles.locatingText}>No drops to recover.</Text>
+              ) : (
+                drops.map((m) => {
+                  const isCleared = !!m.clearedAt;
+                  return (
+                    <TouchableOpacity
+                      key={m.checkpointId}
+                      style={[styles.dropRow, isCleared && styles.dropRowDone]}
+                      onPress={() => toggleDropCleared(m)}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons
+                        name={isCleared ? 'checkbox' : 'square-outline'}
+                        size={22}
+                        color={isCleared ? Colors.success : Colors.textSecondary}
+                      />
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.dropName, isCleared && styles.dropNameDone]}>{m.name}</Text>
+                        {isCleared && (
+                          <Text style={styles.dropBy}>
+                            Collected by {m.clearedByName ?? 'someone'}
+                          </Text>
+                        )}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })
+              )}
+            </ScrollView>
+          )}
+        </View>
+
+        {/* #94: the safety alert runs through cleanup — this is exactly when someone is
+            alone in the dark at the far end of the arena. */}
+        <View style={styles.outBtnWrap}>{renderSosButton()}</View>
+      </>
+    );
+  }
 
   /**
    * What a dead player sees during play / endgame / cleanup (#89 + #99).
@@ -1065,11 +1190,12 @@ export default function PlayerGameScreen() {
         </View>
 
         {isWaiting && renderWaiting()}
+        {/* #84: recovery is its own screen, and it is the SAME screen alive or dead —
+            everyone left in the arena has the same job, so there is nothing to branch on. */}
+        {phase === 'cleanup' && renderCleanup()}
         {/* #89: a dead player gets their own screen, not the living one with the action
-            bar swapped out. #84: `cleanup` lands here too — the game is not over, and a
-            player still in the woods is exactly who recovery needs on the map. */}
-        {(phase === 'play' || phase === 'endgame' || phase === 'cleanup') &&
-          (out ? renderDead() : renderPlay())}
+            bar swapped out. */}
+        {(phase === 'play' || phase === 'endgame') && (out ? renderDead() : renderPlay())}
         {phase === 'results' && renderResults()}
 
         {gameId && phase !== 'results' && (
@@ -1169,6 +1295,23 @@ const styles = StyleSheet.create({
   spectatorWaitSub: {
     color: Colors.textMuted, fontSize: 12, textAlign: 'center', paddingHorizontal: 32, lineHeight: 18,
   },
+  // #84: recovery — a calmer register than play. The game is decided; this is the walk-out.
+  cleanupBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginHorizontal: 16, marginBottom: 10, paddingVertical: 10, paddingHorizontal: 12,
+    borderRadius: 10, backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border,
+  },
+  cleanupTitle: { color: Colors.text, fontSize: 14, fontWeight: '800' },
+  cleanupSub: { color: Colors.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 2 },
+  dropRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: Colors.surface, borderRadius: 10, padding: 14,
+    borderWidth: 1, borderColor: Colors.border,
+  },
+  dropRowDone: { borderColor: Colors.success, opacity: 0.75 },
+  dropName: { color: Colors.text, fontSize: 15, fontWeight: '700' },
+  dropNameDone: { textDecorationLine: 'line-through', color: Colors.textSecondary },
+  dropBy: { color: Colors.textMuted, fontSize: 12, marginTop: 2 },
 
   statusCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12, marginHorizontal: 16, marginBottom: 12,

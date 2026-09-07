@@ -19,7 +19,7 @@ import { onForegroundMessage } from '@/services/notificationService';
 import { doc, onSnapshot } from '@react-native-firebase/firestore';
 import { db } from '@/services/firebase';
 import { Collections } from '@/services/firebase';
-import { endGame, openLobby, reopenSetup, startGame, startEndgame, ENDGAME_RALLY_ID, updateGameConfig, deleteGame, setGameArchived, setGameMedia, resetPracticeGame, addCheckpoint, addRunbookEntry, sendBroadcast, sendGmMessage, subscribeGmMessages, gameConfig, parseEventDate, formatEventDate } from '@/services/gameService';
+import { endGame, startCleanup, reopenPlay, openLobby, reopenSetup, startGame, startEndgame, ENDGAME_RALLY_ID, updateGameConfig, deleteGame, setGameArchived, setGameMedia, resetPracticeGame, addCheckpoint, addRunbookEntry, sendBroadcast, sendGmMessage, subscribeGmMessages, gameConfig, parseEventDate, formatEventDate } from '@/services/gameService';
 import { PostGameMedia } from '@/components/PostGameMedia';
 import { friendlyError } from '@/services/errorUtils';
 import { validateGameConfig } from '@/common/gameConfigValidation';
@@ -41,7 +41,7 @@ const PHASE_LABEL: Record<string, string> = {
 
 export default function GMGameScreen() {
   const { gameId } = useLocalSearchParams<{ gameId: string }>();
-  const { game, phase, checkpoints, members, playerLocations, arrivals, rations, loadGame, clearGame } = useGame();
+  const { game, phase, checkpoints, members, playerLocations, arrivals, rations, markers, loadGame, clearGame } = useGame();
   const { user } = useAuth();
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('map');
@@ -271,6 +271,36 @@ export default function GMGameScreen() {
     );
   }
 
+  /**
+   * #84: declare the victor and open recovery — the stop between "someone won" and "the
+   * game is closed". Deliberately does NOT run the unaccounted-player check: cleanup is
+   * precisely the phase in which you find out somebody never came back, so blocking its
+   * *start* on people being unaccounted-for would withhold the tool for the problem. The
+   * check stays on Close Game.
+   */
+  function handleStartCleanup() {
+    Alert.alert(
+      'Declare the victor?',
+      'The winner is announced now, and the game moves to recovery: everyone can see everyone on the map, every checkpoint becomes visible so people can navigate to the drops, and anyone can mark a drop collected. Tracking and safety alerts keep running. Nobody is pushed — people who have gone home stay gone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Declare & recover', onPress: () => runPhaseAction(() => startCleanup(gameId!)) },
+      ]
+    );
+  }
+
+  /** #84: a victory called wrong. The one sanctioned reversal out of recovery. */
+  function handleReopenPlay() {
+    Alert.alert(
+      'Back to play?',
+      'Use this if the victory was called wrong. The winner is un-declared and play resumes. Note that checkpoints revealed for recovery stay visible — players who have seen the map cannot unsee it.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Resume play', onPress: () => runPhaseAction(() => reopenPlay(gameId!)) },
+      ]
+    );
+  }
+
   function handleEndGame() {
     // #43: a practice game ends instantly (no unaccounted block / confirm) — it's a
     // disposable rehearsal and auto-deletes on end.
@@ -450,7 +480,8 @@ export default function GMGameScreen() {
   // #24: once play has begun, the interval-defining fields (game length + ration interval)
   // are frozen — editing them rescrambles the ration schedule. Disabled with a reason here;
   // the rules enforce it server-side too.
-  const intervalLocked = phase === 'play' || phase === 'endgame' || phase === 'results';
+  const intervalLocked =
+    phase === 'play' || phase === 'endgame' || phase === 'cleanup' || phase === 'results';
   // Players we already have a location fix for (lobby readiness, #16). Used to show the
   // GM "N/N located" so they can wait to start until everyone is on the map.
   const locatedIds = new Set(playerLocations.map((l) => l.userId));
@@ -482,6 +513,16 @@ export default function GMGameScreen() {
     () => new Set(members.filter((m) => m.sos).map((m) => m.userId)),
     [members]
   );
+  // #84: recovery progress. Every checkpoint is projected into `markers` when cleanup
+  // opens, so the marker set IS the drop list and `clearedAt` is the tally — no extra
+  // field, and no second collection. The phase only ever ends manually; this is the
+  // "every drop is cleared" cue the GM needs to know they *can* end it.
+  const dropTotal = markers.filter((m) => m.checkpointId !== ENDGAME_RALLY_ID).length;
+  const dropsCleared = markers.filter(
+    (m) => m.checkpointId !== ENDGAME_RALLY_ID && m.clearedAt
+  ).length;
+  const allDropsCleared = dropTotal > 0 && dropsCleared === dropTotal;
+
   const drawnLocations = useMemo(() => {
     if (phase === 'cleanup') return playerLocations;
     const hidden = new Set(
@@ -517,7 +558,9 @@ export default function GMGameScreen() {
               <Ionicons name="flask-outline" size={22} color={Colors.primary} />
             </TouchableOpacity>
           )}
-          {(phase === 'lobby' || phase === 'play' || phase === 'endgame') && (
+          {/* #84: broadcast stays available through recovery — "leave the north drops,
+              we'll get them tomorrow" is exactly the kind of thing a GM needs to say. */}
+          {(phase === 'lobby' || phase === 'play' || phase === 'endgame' || phase === 'cleanup') && (
             <TouchableOpacity onPress={() => setShowBroadcast(true)} style={styles.headerBtn}>
               <Ionicons name="megaphone-outline" size={22} color={Colors.text} />
             </TouchableOpacity>
@@ -614,8 +657,21 @@ export default function GMGameScreen() {
         />
       )}
 
-      {(phase === 'play' || phase === 'endgame') && (
+      {(phase === 'play' || phase === 'endgame' || phase === 'cleanup') && (
         <>
+          {/* #84: recovery banner — the victor is declared, the arena is lit, and the
+              job now is getting every prop and every person back. */}
+          {phase === 'cleanup' && (
+            <View style={styles.cleanupBanner}>
+              <Ionicons name={allDropsCleared ? 'checkmark-circle' : 'basket-outline'} size={18} color={allDropsCleared ? Colors.success : Colors.primary} />
+              <Text style={styles.endgameBannerText}>
+                {game?.winnerName ? `${game.winnerName} won. ` : ''}
+                Recovery — {allDropsCleared
+                  ? 'every drop is cleared. Safe to close.'
+                  : `${dropsCleared} of ${dropTotal} drop${dropTotal === 1 ? '' : 's'} collected.`}
+              </Text>
+            </View>
+          )}
           {/* #41: end-game banner — the showdown is on. */}
           {phase === 'endgame' && (
             <View style={styles.endgameBanner}>
@@ -742,8 +798,25 @@ export default function GMGameScreen() {
                     <Text style={styles.endgameBtnText}>Start End-Game</Text>
                   </TouchableOpacity>
                 )}
+                {/* #84: the new middle step. Declaring the victor no longer closes the
+                    game — Close Game (below) still does, and is still reachable straight
+                    from play for a GM who doesn't want a recovery phase. */}
+                {(phase === 'play' || phase === 'endgame') && (
+                  <TouchableOpacity onPress={handleStartCleanup} style={styles.endgameBtn} disabled={busy}>
+                    <Ionicons name="trophy-outline" size={16} color={Colors.primary} />
+                    <Text style={styles.endgameBtnText}>Declare Victor</Text>
+                  </TouchableOpacity>
+                )}
+                {phase === 'cleanup' && (
+                  <TouchableOpacity onPress={handleReopenPlay} style={styles.endgameBtn} disabled={busy}>
+                    <Ionicons name="arrow-undo-outline" size={16} color={Colors.primary} />
+                    <Text style={styles.endgameBtnText}>Back to Play</Text>
+                  </TouchableOpacity>
+                )}
                 <TouchableOpacity onPress={handleEndGame} style={styles.endBtn} disabled={busy}>
-                  <Text style={styles.endBtnText}>End Game</Text>
+                  <Text style={styles.endBtnText}>
+                    {phase === 'cleanup' ? 'Close Game' : 'End Game'}
+                  </Text>
                 </TouchableOpacity>
               </>
             )}
@@ -1473,6 +1546,12 @@ const styles = StyleSheet.create({
     borderRadius: 8, backgroundColor: Colors.primary + '1A', borderWidth: 1, borderColor: Colors.primary,
   },
   endgameBannerText: { color: Colors.text, fontSize: 13, fontWeight: '600', flex: 1 },
+  // #84: recovery reads as a calmer state than the showdown — the game is decided.
+  cleanupBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginHorizontal: 16, marginBottom: 8, paddingVertical: 8, paddingHorizontal: 12,
+    borderRadius: 8, backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border,
+  },
 
   // Setup
   setupBody: { padding: 16, gap: 12 },

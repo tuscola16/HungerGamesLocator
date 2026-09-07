@@ -113,7 +113,11 @@ async function handleDeath(
 
   const ended = await db.runTransaction(async (t) => {
     const gSnap = await t.get(gameRef);
-    if (!gSnap.exists || gSnap.data()?.status === 'ended') return false; // already over
+    // #84: `status` alone no longer says "decided" — a game in `cleanup` has a victor but
+    // is still active, and a second death landing after the auto-advance must not re-crown.
+    // Both conditions, or the transaction becomes non-idempotent the moment cleanup exists.
+    const g = gSnap.data();
+    if (!gSnap.exists || g?.status === 'ended' || g?.phase === 'cleanup') return false;
 
     const mSnap = await t.get(gameRef.collection('members'));
     const living = mSnap.docs
@@ -148,10 +152,15 @@ async function handleDeath(
     // especially) who took the crown. Only the single-winner case; zero survivors leaves
     // it unset. `winnerName` is denormalized because players can't read other members.
     const winner = threshold === 'one' && living.length === 1 ? living[0] : null;
+    // #84: the last death declares a **victor**, it does not close the game. Advance to
+    // `cleanup` with `status` left `'active'`, so tracking, the boundary alert and SOS keep
+    // running while everyone is still in the woods collecting props and walking out. The
+    // GM closes it by hand when the recovery job is actually done — and `endedAt` is
+    // stamped there, not here, so a player's results time reflects the game rather than
+    // however long cleanup took.
     t.update(gameRef, {
-      phase: 'results',
-      status: 'ended',
-      endedAt: admin.firestore.FieldValue.serverTimestamp(),
+      phase: 'cleanup',
+      cleanupStartedAt: admin.firestore.FieldValue.serverTimestamp(),
       ...(winner ? { winnerId: winner.userId, winnerName: winner.displayName ?? null } : {}),
     });
     return true;

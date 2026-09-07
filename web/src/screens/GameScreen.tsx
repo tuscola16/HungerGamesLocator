@@ -12,7 +12,7 @@ import { useNow } from '@/hooks/useNow';
 import { friendlyError } from '@/services/errorUtils';
 import { stalenessLevel, stalenessColor, formatAgo, STALE_MS, unaccountedPlayers, unaccountedReasonText, isLowBattery, formatBattery } from '@/services/locationStatus';
 import {
-  openLobby, reopenSetup, startGame, endGame, startEndgame, ENDGAME_RALLY_ID, updateGameConfig, gameConfig,
+  openLobby, reopenSetup, startGame, endGame, startCleanup, reopenPlay, startEndgame, ENDGAME_RALLY_ID, updateGameConfig, gameConfig,
   addCheckpoint, updateCheckpoint, deleteCheckpoint,
   updateMemberRole, removePlayer, eliminatePlayer, revivePlayer, clearSos, ackSos, sendBroadcast,
   deleteGame, setGameArchived, reviewRation, rationInterval, setMemberDistrict,
@@ -54,7 +54,7 @@ function boundaryQuad(b: MapBoundary): { latitude: number; longitude: number }[]
 export function GameScreen() {
   const { gameId } = useParams<{ gameId: string }>();
   const navigate = useNavigate();
-  const { game, phase, checkpoints, runbookEntries, members, playerLocations, arrivals, rations, entryTrips, loadGame, clearGame } = useGame();
+  const { game, phase, checkpoints, runbookEntries, members, playerLocations, arrivals, rations, entryTrips, markers, loadGame, clearGame } = useGame();
   const { user } = useAuth();
   const [busy, setBusy] = useState(false);
   const [showCodes, setShowCodes] = useState(false);
@@ -163,6 +163,15 @@ export function GameScreen() {
   // living harder to pick out. The two exceptions are an **open safety alert** (which is
   // precisely the case the lifted tracking gate exists for — withholding that pin would
   // defeat #94) and **`cleanup`** (#84), whose entire job is finding people and props.
+  // #84: recovery progress. Every checkpoint is projected into `markers` when cleanup
+  // opens, so the marker set IS the drop list and `clearedAt` is the tally — no extra
+  // field and no second collection. The phase only ever ends manually; this is the cue that
+  // tells the GM it is safe to.
+  const dropMarkers = markers.filter((m) => m.checkpointId !== ENDGAME_RALLY_ID);
+  const dropTotal = dropMarkers.length;
+  const dropsCleared = dropMarkers.filter((m) => m.clearedAt).length;
+  const allDropsCleared = dropTotal > 0 && dropsCleared === dropTotal;
+
   const sosUserIds = new Set(members.filter((m) => m.sos).map((m) => m.userId));
   const hiddenOnMap = new Set(members.filter((m) => m.out && !m.sos).map((m) => m.userId));
   const drawnLocations =
@@ -284,7 +293,7 @@ export function GameScreen() {
             onDelete={confirmDelete}
           />
         )}
-        {(phase === 'play' || phase === 'endgame') && (
+        {(phase === 'play' || phase === 'endgame' || phase === 'cleanup') && (
           <PlayView
             gameId={gameId!}
             phase={phase}
@@ -319,6 +328,26 @@ export function GameScreen() {
             onAckSos={(userId) => run(() => ackSos(gameId!, userId))}
             onClearSos={(userId) => run(() => clearSos(gameId!, userId))}
             onOpenPlayers={() => setShowPlayers(true)}
+            allDropsCleared={allDropsCleared}
+            dropsCleared={dropsCleared}
+            dropTotal={dropTotal}
+            winnerName={game?.winnerName ?? null}
+            // #84: declaring the victor deliberately does NOT run the unaccounted-player
+            // check. Recovery is precisely the phase in which you find out somebody never
+            // came back, so blocking its *start* on people being unaccounted-for would
+            // withhold the tool for the problem. That check stays on Close Game, below.
+            onDeclareVictor={() => {
+              if (!window.confirm(
+                'Declare the victor and open recovery?\n\nThe winner is announced now, and the game moves to recovery: everyone can see everyone on the map, every checkpoint becomes visible so people can navigate to the drops, and anyone can mark a drop collected. Tracking and safety alerts keep running. Nobody is pushed — people who have gone home stay gone.'
+              )) return;
+              run(() => startCleanup(gameId!));
+            }}
+            onReopenPlay={() => {
+              if (!window.confirm(
+                'Go back to play?\n\nUse this if the victory was called wrong. The winner is un-declared and play resumes. Checkpoints revealed for recovery stay visible — players who have seen the map cannot unsee it.'
+              )) return;
+              run(() => reopenPlay(gameId!));
+            }}
             onEnd={() => {
               // #43: a practice game ends instantly (no block/confirm) — disposable, auto-deletes.
               if (game?.practice) { run(() => endGame(gameId!)); return; }
@@ -1378,7 +1407,7 @@ function PlayView({
   checkpoints, runbookEntries, playerLocations, sosUserIds, deathMarkers, boundary, arrivals, entryTrips, members, busy,
   rationsEnabled, pendingRations, onOpenRations, mapOverlay,
   placingRally, rallyPoint, rallyDraftSet, onPlaceRally, onStartPlaceRally, onCancelRally, onConfirmEndgame,
-  onBroadcast, onAckSos, onClearSos, onOpenPlayers, onEnd,
+  onBroadcast, onAckSos, onClearSos, onOpenPlayers, onEnd, onDeclareVictor, onReopenPlay, allDropsCleared, dropsCleared, dropTotal, winnerName,
 }: {
   gameId: string;
   phase: string;
@@ -1415,6 +1444,15 @@ function PlayView({
   onClearSos: (userId: string) => void;
   onOpenPlayers: () => void;
   onEnd: () => void;
+  /** #84: declare the victor and open recovery (play/endgame → cleanup). */
+  onDeclareVictor: () => void;
+  /** #84: a victory called wrong — step back out of recovery (cleanup → play). */
+  onReopenPlay: () => void;
+  /** #84: recovery tally, derived from the marker set — see the GameScreen comment. */
+  allDropsCleared: boolean;
+  dropsCleared: number;
+  dropTotal: number;
+  winnerName: string | null;
 }) {
   // #75: cap the sidebar feed; the header opens the full, filterable feed in a modal.
   const [showAllNotifs, setShowAllNotifs] = useState(false);
@@ -1447,6 +1485,24 @@ function PlayView({
             {placingRally
               ? (rallyDraftSet ? '🔥 Rally placed — confirm in the sidebar, or click again to move it.' : '🔥 Click the map to place the final rally point.')
               : '🔥 Final showdown — rations off, players rallying to the marked point.'}
+          </div>
+        )}
+        {/* #84: recovery. The tally is derived from the markers — every checkpoint is
+            projected into `markers` when cleanup opens, so `clearedAt` counts against the
+            marker total with no extra field and no second collection. The phase only ever
+            ends manually; this is the "safe to close" cue. */}
+        {phase === 'cleanup' && (
+          <div style={{
+            position: 'absolute', top: 12, left: 12, right: 12, textAlign: 'center',
+            background: allDropsCleared ? 'rgba(60,160,90,0.92)' : 'rgba(20,20,20,0.9)',
+            color: allDropsCleared ? '#000' : 'var(--text)',
+            border: '1px solid var(--border)',
+            padding: '8px 12px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+          }}>
+            {winnerName ? `🏆 ${winnerName} won. ` : ''}
+            {allDropsCleared
+              ? 'Every drop is cleared — safe to close the game.'
+              : `Recovery — ${dropsCleared} of ${dropTotal} drop${dropTotal === 1 ? '' : 's'} collected. Everyone can see everyone; anyone can tick a drop off.`}
           </div>
         )}
       </div>
@@ -1531,7 +1587,23 @@ function PlayView({
         ) : phase === 'play' ? (
           <button className="btn btn--secondary" onClick={onStartPlaceRally} disabled={busy}>🔥 Start End-Game</button>
         ) : null}
-        <button className="btn btn--danger" onClick={onEnd} disabled={busy}>End Game</button>
+        {/* #84: declaring the victor no longer closes the game. Close Game stays reachable
+            straight from play, so a GM who doesn't want a recovery phase never passes
+            through one — and an old client that has never heard of `cleanup` isn't
+            stranded. */}
+        {!placingRally && (phase === 'play' || phase === 'endgame') && (
+          <button className="btn btn--secondary" onClick={onDeclareVictor} disabled={busy}>
+            🏆 Declare Victor &amp; Recover
+          </button>
+        )}
+        {phase === 'cleanup' && (
+          <button className="btn btn--ghost" onClick={onReopenPlay} disabled={busy}>
+            ↩ Back to play
+          </button>
+        )}
+        <button className="btn btn--danger" onClick={onEnd} disabled={busy}>
+          {phase === 'cleanup' ? 'Close Game' : 'End Game'}
+        </button>
       </aside>
 
       {showAllNotifs && (

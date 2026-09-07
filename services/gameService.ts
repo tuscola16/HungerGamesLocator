@@ -37,11 +37,29 @@ import {
   type ScheduledActionType,
 } from '@/types';
 
-/** Resolve a game's phase, defaulting legacy games (created before the `phase`
- * field existed) to `play` while active and `results` once ended. */
+/**
+ * Every phase this build knows how to render. Anything else is a value written by a NEWER
+ * build than this one, and `gamePhase()` degrades it rather than returning a phase every
+ * screen's `phase === …` branch will miss.
+ */
+const KNOWN_PHASES = new Set<string>([
+  'setup', 'lobby', 'play', 'endgame', 'cleanup', 'results',
+]);
+
+/**
+ * Resolve a game's phase, defaulting legacy games (created before the `phase` field
+ * existed) to `play` while active and `results` once ended.
+ *
+ * **Forward-compat, decided with #84.** Adding `'cleanup'` made the reverse case real: a
+ * game doc can now carry a phase a client in the field has never heard of, and every screen
+ * branches with `phase === …`, so an unrecognized value used to land on *no* branch — a
+ * blank screen with no way out. Unknown phases therefore degrade to the game's `status`:
+ * `results` once ended, `play` while active. Degraded rather than stranded, and the GM's
+ * end-of-game controls stay reachable.
+ */
 export function gamePhase(game: { phase?: GamePhase; status?: GameStatus } | null | undefined): GamePhase {
   if (!game) return 'setup';
-  if (game.phase) return game.phase;
+  if (game.phase && KNOWN_PHASES.has(game.phase)) return game.phase;
   return game.status === 'ended' ? 'results' : 'play';
 }
 
@@ -347,10 +365,23 @@ export async function revivePlayer(gameId: string, userId: string): Promise<void
     createdAt: serverTimestamp(),
   });
 
-  // If this death had ended the game, reopen play. (The stale winner broadcast is left
+  // If this death had decided the game, reopen play. (The stale winner broadcast is left
   // as-is — the correcting broadcast covers it; don't try to retract it.)
-  if (gamePhase(game) === 'results' && game?.status === 'ended') {
-    await updateDoc(gameRef, { phase: 'play', status: 'active', endedAt: null });
+  //
+  // #84: there are now two ways a death can decide a game. Winner detection advances to
+  // `cleanup` with the game still active; a GM closing by hand lands in `results` with
+  // `status: 'ended'`. Both have to be undoable, and the winner stamp has to come off with
+  // them — otherwise a revived player's game carries a crown that is no longer true.
+  // The winner stamp is cleared **server-side** by `onGameReopen`, which watches for any
+  // transition back into `play` — `winnerId`/`winnerName` stay server-owned rather than
+  // being added to the GM's writable key set for this one path.
+  const phase = gamePhase(game);
+  if (phase === 'results' && game?.status === 'ended') {
+    await updateDoc(gameRef, {
+      phase: 'play', status: 'active', endedAt: null, cleanupStartedAt: null,
+    });
+  } else if (phase === 'cleanup') {
+    await updateDoc(gameRef, { phase: 'play', cleanupStartedAt: null });
   }
 }
 
@@ -575,19 +606,100 @@ export async function setGameArchived(
 }
 
 /**
- * Stop play and move to results (phase: play → results). Keeps `status: 'ended'`
- * so existing "is this game over?" checks (and old clients) keep working. #22: a no-op
- * if already in results (double-tap safe), and refused before play has started.
+ * Declare the victor and open recovery (phase: play/endgame → cleanup). ROADMAP #84.
+ *
+ * `endGame()` used to collapse two moments into one write — the instant a winner was
+ * called, tracking stopped, the map went cold, and the job of collecting every prop from
+ * every checkpoint and accounting for every person still in the woods happened with no
+ * tooling at all. This is the stop in between.
+ *
+ * **`status` stays `'active'`.** Only `joinGameByCode`'s active-only match keys off it, and
+ * a game in cleanup genuinely shouldn't be joinable-or-not on that basis; everything else
+ * reads the phase. Keeping it active is what keeps tracking, the boundary alert and SOS
+ * running — which is the point, since the people this phase is about are still outdoors.
+ *
+ * Server-side, entering cleanup: stamps the winner (`onGameCleanupStart`), projects every
+ * checkpoint into `markers` so people can navigate to what they're recovering, and purges
+ * the ration photos — those have proved what they were going to prove. Locations and
+ * arrivals deliberately survive to the close.
+ *
+ * **No push goes out.** People who have already gone home are not summoned back.
+ *
+ * #22: a no-op if already in cleanup, and refused unless the game is in play/endgame.
+ * Unlike the other transitions this one is **reversible** — see `reopenPlay()`.
  */
-export async function endGame(gameId: string): Promise<void> {
+export async function startCleanup(gameId: string): Promise<void> {
+  const phase = await readPhase(gameId);
+  if (phase === 'cleanup') return; // already open — no-op
+  if (phase !== 'play' && phase !== 'endgame') {
+    throw new Error('Recovery can only be opened from a game in play.');
+  }
+  await updateDoc(doc(db, Collections.GAMES, gameId), {
+    phase: 'cleanup',
+    cleanupStartedAt: serverTimestamp(),
+  });
+}
+
+/**
+ * Step back from cleanup to play (#84) — the one sanctioned reversal, for a victory called
+ * wrong. Clears `cleanupStartedAt` and the winner stamp so a corrected finish doesn't
+ * inherit the wrong crown; the markers projected at cleanup start are left alone, because
+ * a player who has already seen the map cannot unsee it (the same operational fact #99
+ * records about reviving a spectator).
+ */
+export async function reopenPlay(gameId: string): Promise<void> {
+  const phase = await readPhase(gameId);
+  if (phase === 'play') return; // already there — no-op
+  if (phase !== 'cleanup') throw new Error('Only a game in recovery can return to play.');
+  // The winner stamp is cleared server-side by `onGameReopen`; `winnerId`/`winnerName` are
+  // not in the GM's writable key set and shouldn't be.
+  await updateDoc(doc(db, Collections.GAMES, gameId), {
+    phase: 'play',
+    cleanupStartedAt: null,
+  });
+}
+
+/**
+ * Close the game for good (phase: play/endgame/cleanup → results). Sets `status: 'ended'`
+ * so existing "is this game over?" checks (and old clients) keep working, and it is this
+ * transition that triggers the location/arrival purge (#30) and the unaccounted-player
+ * check (#6/#28) — cleanup is exactly when you find out somebody never came back.
+ *
+ * #22: a no-op if already in results (double-tap safe), and refused before play has begun.
+ * Reachable from `play` directly, so a GM who doesn't want a recovery phase never has to
+ * pass through one — and so a client that has never heard of `cleanup` is never stranded.
+ */
+export async function closeGame(gameId: string): Promise<void> {
   const phase = await readPhase(gameId);
   if (phase === 'results') return; // already ended — no-op
-  // #41: closeable from play OR the end-game showdown.
-  if (phase !== 'play' && phase !== 'endgame') throw new Error('Only a game in play can be ended.');
+  // #41/#84: closeable from play, the end-game showdown, or recovery.
+  if (phase !== 'play' && phase !== 'endgame' && phase !== 'cleanup') {
+    throw new Error('Only a game in play can be ended.');
+  }
   await updateDoc(doc(db, Collections.GAMES, gameId), {
     status: 'ended',
     phase: 'results',
     endedAt: serverTimestamp(),
+  });
+}
+
+/** Back-compat alias for `closeGame` — the name every existing caller uses. */
+export const endGame = closeGame;
+
+/**
+ * Mark a drop recovered during cleanup (#84), or un-mark it. Anyone in the game may do
+ * this: the person standing at the site is the one who knows. The name is denormalized
+ * because players can't read each other's member docs.
+ */
+export async function setDropCleared(
+  gameId: string,
+  checkpointId: string,
+  by: { userId: string; displayName: string } | null
+): Promise<void> {
+  await updateDoc(doc(db, Collections.GAMES, gameId, Collections.MARKERS, checkpointId), {
+    clearedBy: by ? by.userId : null,
+    clearedByName: by ? by.displayName : null,
+    clearedAt: by ? serverTimestamp() : null,
   });
 }
 

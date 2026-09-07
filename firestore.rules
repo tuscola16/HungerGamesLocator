@@ -107,7 +107,7 @@ service cloud.firestore {
       // routing straight around the #20/#22/#28 integrity invariants.
       allow update: if isGameGM(gameId)
         && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['name', 'phase', 'status', 'rules', 'boundary', 'config', 'startedAt', 'endedAt', 'gameDate', 'isTest', 'testStepIndex', 'mapOverlay', 'media'])
+             .hasOnly(['name', 'phase', 'status', 'rules', 'boundary', 'config', 'startedAt', 'endedAt', 'cleanupStartedAt', 'gameDate', 'isTest', 'testStepIndex', 'mapOverlay', 'media'])
         && (
           // #41: the interval trio is frozen once the resolved phase is `play` OR `endgame`
           // (interval edits there are moot, but the freeze should stay closed).
@@ -225,9 +225,14 @@ service cloud.firestore {
       // The listener lifecycle follows from this: a subscription attached during the
       // countdown is denied outright rather than queued, so the client holds off and
       // attaches when the timer expires.
+      // #84: during `cleanup` ANY member may read any location. Locating people — players
+      // and GMs alike — is half the point of the recovery phase, and a location doc carries
+      // no contact data, so this is a rule change rather than another projection. Strictly
+      // phase-gated: mutual visibility during play would break the whole game.
       match /locations/{userId} {
         allow read: if isGameGM(gameId)
           || (isSignedIn() && request.auth.uid == userId)
+          || (isGameMember(gameId) && gamePhase(gameId) == 'cleanup')
           || isSpectator(gameId);
         allow create, update: if isSignedIn()
           && request.auth.uid == userId
@@ -367,6 +372,16 @@ service cloud.firestore {
               && (resource.data.get('audiencePlayerIds', null) == null
                   || request.auth.uid in resource.data.audiencePlayerIds));
         allow write: if isGameGM(gameId);
+        // #84: during `cleanup`, ANY member may mark a drop recovered — the person standing
+        // at the site is the one who knows it's clear, not whoever placed it. Narrow on both
+        // keys and phase: the three recovery fields and nothing else, and only while the game
+        // is actually in recovery. Nullable so a mis-tap in the dark is reversible.
+        // Costs one get() on the game doc per write, the same price the #20 member
+        // delete-lock already pays.
+        allow update: if isGameMember(gameId)
+          && gamePhase(gameId) == 'cleanup'
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['clearedBy', 'clearedByName', 'clearedAt']);
       }
     }
   }

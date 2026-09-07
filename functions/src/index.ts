@@ -7,6 +7,7 @@ export { onMemberWriteProjectRoster, onGamePhaseProjectRoster } from './roster';
 export { createGame, cloneGame, joinGameByCode, deleteGame, resetPracticeGame, transferGmOrEndGame } from './games';
 export { onBroadcastCreate } from './broadcasts';
 export { cleanupRationPhotosOnGameEnd } from './cleanup';
+export { onGameCleanupStart, onGameReopen } from './cleanupPhase';
 export { runScheduledEvents } from './runsheet';
 export { submitRation } from './rations';
 export { rationPings } from './rationPings';

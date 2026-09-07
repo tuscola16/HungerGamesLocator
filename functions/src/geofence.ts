@@ -475,6 +475,13 @@ export const onLocationUpdate = functions
     const phase = gameData.phase ?? (gameData.status === 'ended' ? 'results' : 'play');
     // #41: keep tracking, boundary, SOS, and checkpoint eval running through the end-game
     // showdown (a convergence checkpoint can still fire); only the ration loop turns off.
+    //
+    // #84: `cleanup` is deliberately NOT in this list, and must not be added. Recovery is a
+    // phase in which people are sent *to* checkpoints to collect the props — nobody should
+    // trip the trap they were sent to retrieve. Location writes are unaffected (both GM
+    // maps and the spectator map are plain Firestore listeners), so everyone stays visible;
+    // it is only crossing resolution that goes quiet. The boundary-exit alert goes quiet
+    // with it, which is right for a phase whose whole point is that people are walking out.
     if (phase !== 'play' && phase !== 'endgame') return;
 
     // Resolve geofence config knobs with defaults (#50/#55/#56/#67).

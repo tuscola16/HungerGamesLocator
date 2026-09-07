@@ -9,7 +9,7 @@ import {
 } from 'firebase/firestore';
 import { db, Collections } from '@/services/firebase';
 import { gameConfig, gamePhase } from '@/services/gameService';
-import type { Game, Checkpoint, RunbookEntry, GameMember, PlayerLocation, Arrival, GamePhase, RationSubmission, ScheduledEvent, EntryTrip } from '@shared/types';
+import type { Game, Checkpoint, RunbookEntry, GameMember, PlayerLocation, Arrival, GamePhase, RationSubmission, ScheduledEvent, EntryTrip, RevealedMarker } from '@shared/types';
 import { LocationStabilizer, type StabilizedLocation } from '@shared/common/locationStabilizer';
 
 interface GameContextValue {
@@ -33,6 +33,8 @@ interface GameContextValue {
   scheduledEvents: ScheduledEvent[];
   /** Runbook entries that have actually fired, per player (GM only, #67/#73). */
   entryTrips: EntryTrip[];
+  /** Revealed checkpoint markers (#48). GM-side this doubles as the #84 drop list. */
+  markers: RevealedMarker[];
   loadGame: (gameId: string, role: 'player' | 'gm') => void;
   clearGame: () => void;
 }
@@ -60,6 +62,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const [rations, setRations] = useState<RationSubmission[]>([]);
   const [scheduledEvents, setScheduledEvents] = useState<ScheduledEvent[]>([]);
   const [entryTrips, setEntryTrips] = useState<EntryTrip[]>([]);
+  const [markers, setMarkers] = useState<RevealedMarker[]>([]);
 
   const loadGame = useCallback((id: string, role: 'player' | 'gm') => {
     setGameId(id);
@@ -199,9 +202,23 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     return () => { unsub(); setEntryTrips([]); };
   }, [gameId, myRole]);
 
+  // Revealed markers (#48). GMs read the whole collection — it is the player-visible
+  // projection of the checkpoints they already have, so it adds no access. It is here for
+  // #84: every checkpoint is projected into `markers` when recovery opens, so this
+  // collection IS the drop list and `clearedAt` is the tally.
+  useEffect(() => {
+    if (!gameId || myRole !== 'gm') return;
+    const unsub = onSnapshot(
+      collection(db, Collections.GAMES, gameId, Collections.MARKERS),
+      (snap) => setMarkers(snap.docs.map((d) => ({ ...d.data() } as RevealedMarker))),
+      (err) => console.error('[GameContext] markers listener error', err)
+    );
+    return () => { unsub(); setMarkers([]); };
+  }, [gameId, myRole]);
+
   return (
     <GameContext.Provider
-      value={{ game, phase: gamePhase(game), myRole, checkpoints, runbookEntries, members, playerLocations, arrivals, rations, scheduledEvents, entryTrips, loadGame, clearGame }}
+      value={{ game, phase: gamePhase(game), myRole, checkpoints, runbookEntries, members, playerLocations, arrivals, rations, scheduledEvents, entryTrips, markers, loadGame, clearGame }}
     >
       {children}
     </GameContext.Provider>

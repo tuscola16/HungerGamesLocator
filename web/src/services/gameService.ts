@@ -82,12 +82,23 @@ export async function reviewRation(
   });
 }
 
-/** Resolve a game's phase, defaulting legacy games (created before the `phase`
- * field existed) to `play` while active and `results` once ended. Ported from
- * the mobile app's gameService.ts. */
+/**
+ * Every phase this build knows how to render — see the mobile `gameService.gamePhase`.
+ */
+const KNOWN_PHASES = new Set<string>([
+  'setup', 'lobby', 'play', 'endgame', 'cleanup', 'results',
+]);
+
+/**
+ * Resolve a game's phase, defaulting legacy games (created before the `phase` field
+ * existed) to `play` while active and `results` once ended. Ported from the mobile app's
+ * gameService.ts, including its #84 forward-compat clamp: a phase this build has never
+ * heard of degrades to the game's `status` rather than matching no `phase === …` branch on
+ * any screen and rendering nothing.
+ */
 export function gamePhase(game: { phase?: GamePhase; status?: GameStatus } | null | undefined): GamePhase {
   if (!game) return 'setup';
-  if (game.phase) return game.phase;
+  if (game.phase && KNOWN_PHASES.has(game.phase)) return game.phase;
   return game.status === 'ended' ? 'results' : 'play';
 }
 
@@ -193,15 +204,78 @@ export async function startGame(gameId: string): Promise<void> {
 /** Stop play and move to results (phase: play → results). Keeps `status: 'ended'`
  * so existing "is this game over?" checks (and the joinGameByCode active filter)
  * keep working. #22: a no-op if already in results, and refused before play. */
-export async function endGame(gameId: string): Promise<void> {
+/**
+ * Declare the victor and open recovery (phase: play/endgame → cleanup). ROADMAP #84 —
+ * mirrors the mobile `gameService.startCleanup`; see it for the full reasoning.
+ *
+ * `status` stays `'active'`, so tracking, the boundary alert and SOS keep running while
+ * people are still in the woods collecting props. No push goes out — anyone who has
+ * already gone home is not being summoned back.
+ */
+export async function startCleanup(gameId: string): Promise<void> {
+  const phase = await readPhase(gameId);
+  if (phase === 'cleanup') return;
+  if (phase !== 'play' && phase !== 'endgame') {
+    throw new Error('Recovery can only be opened from a game in play.');
+  }
+  await updateDoc(doc(db, Collections.GAMES, gameId), {
+    phase: 'cleanup',
+    cleanupStartedAt: serverTimestamp(),
+  });
+}
+
+/**
+ * Step back from cleanup to play (#84) — for a victory called wrong. Clears the winner
+ * stamp so a corrected finish doesn't inherit the wrong crown.
+ */
+export async function reopenPlay(gameId: string): Promise<void> {
+  const phase = await readPhase(gameId);
+  if (phase === 'play') return;
+  if (phase !== 'cleanup') throw new Error('Only a game in recovery can return to play.');
+  // The winner stamp is cleared server-side by `onGameReopen` — `winnerId`/`winnerName`
+  // stay server-owned rather than joining the GM's writable key set for this one path.
+  await updateDoc(doc(db, Collections.GAMES, gameId), {
+    phase: 'play',
+    cleanupStartedAt: null,
+  });
+}
+
+/**
+ * Close the game for good (phase: play/endgame/cleanup → results). This transition is what
+ * triggers the location/arrival purge (#30) and the unaccounted-player check (#6/#28).
+ * Still reachable straight from `play`, so a GM who doesn't want a recovery phase never has
+ * to pass through one.
+ */
+export async function closeGame(gameId: string): Promise<void> {
   const phase = await readPhase(gameId);
   if (phase === 'results') return;
-  // #41: closeable from play OR the end-game showdown.
-  if (phase !== 'play' && phase !== 'endgame') throw new Error('Only a game in play can be ended.');
+  // #41/#84: closeable from play, the end-game showdown, or recovery.
+  if (phase !== 'play' && phase !== 'endgame' && phase !== 'cleanup') {
+    throw new Error('Only a game in play can be ended.');
+  }
   await updateDoc(doc(db, Collections.GAMES, gameId), {
     status: 'ended',
     phase: 'results',
     endedAt: serverTimestamp(),
+  });
+}
+
+/** Back-compat alias for `closeGame` — the name every existing caller uses. */
+export const endGame = closeGame;
+
+/**
+ * Mark a drop recovered during cleanup (#84), or un-mark it. Anyone in the game may do
+ * this — the person standing at the site is the one who knows.
+ */
+export async function setDropCleared(
+  gameId: string,
+  checkpointId: string,
+  by: { userId: string; displayName: string } | null
+): Promise<void> {
+  await updateDoc(doc(db, Collections.GAMES, gameId, Collections.MARKERS, checkpointId), {
+    clearedBy: by ? by.userId : null,
+    clearedByName: by ? by.displayName : null,
+    clearedAt: by ? serverTimestamp() : null,
   });
 }
 
@@ -384,8 +458,18 @@ export async function revivePlayer(gameId: string, userId: string): Promise<void
     createdAt: serverTimestamp(),
   });
 
-  if (gamePhase(game) === 'results' && game?.status === 'ended') {
-    await updateDoc(gameRef, { phase: 'play', status: 'active', endedAt: null });
+  // #84: a death can now decide a game in two ways — winner detection advances to
+  // `cleanup` with the game still active, a manual close lands in `results` with
+  // `status: 'ended'`. Both have to be undoable. The winner stamp is cleared server-side by
+  // `onGameReopen` — winnerId/winnerName stay server-owned rather than joining the GM's
+  // writable key set for this one path.
+  const phase = gamePhase(game);
+  if (phase === 'results' && game?.status === 'ended') {
+    await updateDoc(gameRef, {
+      phase: 'play', status: 'active', endedAt: null, cleanupStartedAt: null,
+    });
+  } else if (phase === 'cleanup') {
+    await updateDoc(gameRef, { phase: 'play', cleanupStartedAt: null });
   }
 }
 

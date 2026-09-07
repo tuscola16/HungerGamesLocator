@@ -77,6 +77,12 @@ export interface Game {
   /** When the GM pressed End (phase → results). */
   endedAt?: FsTimestamp | null;
   /**
+   * ROADMAP #84: when the GM declared the victor and opened recovery (phase → cleanup).
+   * Absent on legacy games and on games closed straight from `play`, which is still a
+   * supported path — `cleanup` is a stop the GM may make, not one they must.
+   */
+  cleanupStartedAt?: FsTimestamp | null;
+  /**
    * The last tribute standing when the game ended (#81): the sole non-GM member still
    * `!out`. Stamped server-side on `status → ended` for BOTH the auto-end (winner
    * detection) and the manual GM End Game paths; absent when the game ended with zero or
@@ -727,6 +733,21 @@ export interface RevealedMarker {
    * their reveal time.
    */
   visibleFrom?: FsTimestamp | null;
+  /**
+   * ROADMAP #84 (cleanup phase): the member who marked this drop recovered.
+   *
+   * **Anyone may set it, not just whoever placed the prop** — the person standing at the
+   * site is the one who knows it's clear. Nullable because a mis-tap in the dark has to be
+   * reversible. The rules allow a member to touch these three keys and nothing else, and
+   * only while the game is in `cleanup`.
+   */
+  clearedBy?: string | null;
+  /**
+   * Denormalized for the same reason as `Game.winnerName` (#81) and `Arrival.playerName`:
+   * players cannot read other members' docs, so the name has to ride with the record.
+   */
+  clearedByName?: string | null;
+  clearedAt?: FsTimestamp | null;
 }
 
 export interface GameMember {
