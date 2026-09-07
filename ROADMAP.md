@@ -273,14 +273,20 @@ unconditionally and `minFixAccuracyMeters` gates only *checkpoint evaluation*, n
   40–50 m" suggestion was based on fused-provider error and is **withdrawn**: widening now
   would only add false triggers, which in a hidden-trap game punish a player who was never
   there and cannot dispute it.
-- **Battery cost of continuous GPS — STILL UNMEASURED, and now the oldest open question in
-  the item.** It was meant to be measured in the 2026-09-06 game and no result was ever
-  recorded here, so as of the Tier 12 build this is exactly where it was. The walk it was
-  derived from was 19 minutes; a real game is 3.5 hours with the receiver effectively always
-  on in an arena this small. The `GPS_FIX_MIN_INTERVAL_MS` rate limit should bound it, but
-  nobody has watched a battery curve yet. `PlayerLocation.battery` is recorded on every fix
-  (#35), so the next game answers this from the trail without anyone doing anything special
-  — **read it out and write the number here.**
+- **Battery cost of continuous GPS — ANSWERED (2026-09-06, Stonedam Day 2). Not a problem.**
+  Continuous GPS ran for ~3 h with 10 players in an arena small enough that the receiver was
+  effectively always on, and **exactly one player finished low**. The `GPS_FIX_MIN_INTERVAL_MS`
+  rate limit appears to bound the cost as intended, and the #35 low-battery beacon did its job:
+  the one case surfaced on the GM roster rather than being discovered when the player dropped
+  off the map.
+
+  **What this is and is not.** It is a fleet-level pass/fail on the question that actually
+  blocked a full event — *does continuous GPS flatten the field over a real game?* — and the
+  answer is no. It is **not** a battery curve: nobody isolated handset, starting charge, screen
+  time, or which A/B arm (`wakeLockEnabled`) that one player was on, so the cost per hour is
+  still unquantified. Don't cite this as "battery is measured"; cite it as "battery was not a
+  problem at Stonedam Day 2". `PlayerLocation.battery` rides every fix (#35), so if a curve is
+  ever wanted, a captured game yields it with no extra instrumentation.
 - **`satellites` is device-dependent.** Per's handset reports 0 alongside good 18 m fixes
   (the OEM doesn't populate the legacy extra); Shannon's reports 7–17 properly. Treat 0 as
   unknown, never as "no satellites".
@@ -1009,9 +1015,11 @@ its bundle ID / SHA-1 and the Maps SDK in Cloud Console before wide release. Con
    a hazard pushes (#83, still never verified), arming a trap kit (#97), and the join QR on a
    GM phone scanning from another phone (#92).
 4. **The field measurements are the only remaining *questions*** — everything else is
-   verification of something already written. The battery curve under **#82** (unmeasured
-   since it was first asked for), and under **#100** the fix-gap length plus re-deriving
-   `STEP_LENGTH_M` / `MIN_STEP_FRACTION` from a real trail. All three now come out of a
+   verification of something already written. Under **#100**, the fix-gap length plus
+   re-deriving `STEP_LENGTH_M` / `MIN_STEP_FRACTION` from a real trail. **#82’s battery
+   question is closed** — Stonedam Day 2 ran ~3 h of continuous GPS and finished with one
+   player low, so it no longer blocks a full event; the per-hour *curve* is still
+   unquantified, but nothing is waiting on it. Both remaining ones come out of a
    single captured game for free: `locationTrail` defaults on, and as of 2026-09-06b it keeps
    the arrivals and trip latches you need to read it against. **Get everyone onto one build
    first** — Stonedam ran three simultaneously and that confounds everything.
