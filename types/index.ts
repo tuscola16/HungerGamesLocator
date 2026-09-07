@@ -152,8 +152,25 @@ export interface Game {
    * photos) auto-deletes when it ends. Absent on real games.
    */
   practice?: boolean;
+  /**
+   * ROADMAP #90: soft-delete stamp. Set = gone from **every** member's list, and eligible
+   * for the hard-delete sweep once 20 minutes have passed. Cleared by an undo.
+   *
+   * The documents survive untouched inside that window, which is what makes undo trivial —
+   * hiding is a client filter plus a rules guard, not a deletion. Any GM of the game may
+   * set it (not just the creator), and there is no age requirement.
+   */
+  deletedAt?: FsTimestamp | null;
+  /** Member uid who deleted it — named in the undo affordance. */
+  deletedBy?: string | null;
   createdAt: FsTimestamp;
 }
+
+/**
+ * ROADMAP #90: how long a soft-deleted game can be recovered before the sweep hard-deletes
+ * it. Shared by the clients (to show the window) and the sweep (to enforce it).
+ */
+export const DELETE_UNDO_WINDOW_MS = 20 * 60 * 1000;
 
 /**
  * GM-tunable game parameters. All fields are stored optionally on `Game.config`;

@@ -573,6 +573,10 @@ export async function getMyGames(userId: string): Promise<MyGameEntry[]> {
       try {
         const gameSnap = await getDoc(doc(db, Collections.GAMES, gameId));
         if (!gameSnap.exists()) return null;
+        // #90: a soft-deleted game is gone from every list, the deleting GM's included.
+        // The documents survive for 20 minutes so an undo is trivial, but nothing should
+        // still be listing a game somebody deleted.
+        if (gameSnap.data()?.deletedAt) return null;
         return {
           game: { id: gameSnap.id, ...gameSnap.data() } as Game,
           role: memberDoc.data().role as 'player' | 'gm',
@@ -587,11 +591,22 @@ export async function getMyGames(userId: string): Promise<MyGameEntry[]> {
   return entries.filter((e): e is MyGameEntry => e !== null);
 }
 
-/** Delete a game that hasn't started yet (GM-only). Runs server-side so the game
- * doc and all its subcollections are removed atomically — see the deleteGame
- * Cloud Function. */
+/**
+ * Delete a game (GM-only — any GM of the game, #90). Runs server-side so the game doc and
+ * all its subcollections go together.
+ *
+ * A game that never started is removed for good. A **finished** game is soft-deleted: gone
+ * from everyone's list immediately, undoable by any GM for 20 minutes, hard-deleted by a
+ * sweep after that. A game in play still can't be deleted at all.
+ */
 export async function deleteGame(gameId: string): Promise<void> {
   const callable = httpsCallable(functions, 'deleteGame');
+  await callable({ gameId });
+}
+
+/** Put a soft-deleted game back (#90), inside the 20-minute window. Any GM may. */
+export async function undoDeleteGame(gameId: string): Promise<void> {
+  const callable = httpsCallable(functions, 'undoDeleteGame');
   await callable({ gameId });
 }
 

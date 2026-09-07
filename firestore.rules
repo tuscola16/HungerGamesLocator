@@ -80,7 +80,13 @@ service cloud.firestore {
       // The game doc holds the secret join codes (playerCode/gmCode), so only
       // members may read it. New joiners never read it directly — they call the
       // joinGameByCode Cloud Function, which resolves the code server-side.
-      allow read: if isGameMember(gameId);
+      //
+      // #90: a soft-deleted game reads as gone. The documents survive for 20 minutes so an
+      // undo is trivial, but nobody should be able to keep watching a game that has been
+      // deleted out from under them — so this is a rules guard, not only a client filter.
+      // A GM keeps reading it, which is what makes the undo affordance possible.
+      allow read: if isGameGM(gameId)
+        || (isGameMember(gameId) && resource.data.get('deletedAt', null) == null);
 
       // Games are created only via the createGame Cloud Function (admin SDK),
       // which also generates secure codes and creates the creator's GM membership.

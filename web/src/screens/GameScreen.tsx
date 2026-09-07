@@ -117,10 +117,17 @@ export function GameScreen() {
     finally { setBusy(false); }
   }
 
+  // #90: from inside a game, deleting a *finished* one is a soft delete with a 20-minute
+  // undo. The undo affordance itself lives on My Games (this screen is about to navigate
+  // away), so this only has to be honest about what's happening — including that other
+  // members lose their history, which is the part a GM doesn't otherwise think about.
   function confirmDelete() {
+    const finished = phase === 'results';
     if (
       !window.confirm(
-        `Delete "${game?.name ?? 'this game'}"? This permanently removes the game, its checkpoints, and all members. This cannot be undone.`
+        finished
+          ? `Delete "${game?.name ?? 'this game'}"?\n\nThis removes the game for EVERYONE — every player who took part loses their record of it, not just you. You have 20 minutes to undo it from My Games, then it is gone for good.`
+          : `Delete "${game?.name ?? 'this game'}"? This permanently removes the game, its checkpoints, and all members. This cannot be undone.`
       )
     ) {
       return;
@@ -391,6 +398,7 @@ export function GameScreen() {
             gmUid={user?.uid ?? ''}
             busy={busy}
             onArchive={archiveAndExit}
+            onDelete={confirmDelete}
             onDone={() => navigate('/games')}
             onViewMap={() => setResultsMap(true)}
           />
@@ -1676,7 +1684,7 @@ function ResultsMapView({
 }
 
 function ResultsView({
-  totalDuration, players, winnerId, startedAtMs, endedAtMs, media, gameId, gmUid, busy, onArchive, onDone, onViewMap,
+  totalDuration, players, winnerId, startedAtMs, endedAtMs, media, gameId, gmUid, busy, onArchive, onDelete, onDone, onViewMap,
 }: {
   totalDuration: number | null;
   players: GameMember[];
@@ -1689,6 +1697,8 @@ function ResultsView({
   gmUid: string;
   busy: boolean;
   onArchive: () => void;
+  /** #90: soft-delete this finished game for every member, with a 20-minute undo. */
+  onDelete: () => void;
   onDone: () => void;
   onViewMap: () => void;
 }) {
@@ -1744,6 +1754,19 @@ function ResultsView({
         <button className="btn btn--ghost" style={{ flex: 1 }} onClick={onDone}>Back to Games</button>
         <button className="btn btn--secondary" style={{ flex: 1 }} onClick={onArchive} disabled={busy}>
           Archive game
+        </button>
+      </div>
+      {/* #90: archiving hides a finished game from your own list; deleting removes it from
+          everyone's. The two sit together because the difference between them is the whole
+          point, and only one is reversible — for 20 minutes. */}
+      <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
+        <button
+          className="btn btn--ghost"
+          style={{ flex: 1, color: 'var(--danger)' }}
+          onClick={onDelete}
+          disabled={busy}
+        >
+          Delete for everyone
         </button>
       </div>
     </div>

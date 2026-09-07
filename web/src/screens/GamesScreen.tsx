@@ -8,6 +8,7 @@ import {
   cloneGame,
   joinGameByCode,
   deleteGame,
+  undoDeleteGame,
   setGameArchived,
   type MyGameEntry,
 } from '@/services/gameService';
@@ -18,6 +19,8 @@ const PHASE_TEXT: Record<string, string> = {
   setup: '● Setting up',
   lobby: '● Lobby open',
   play: '● In play',
+  endgame: '● Final showdown',
+  cleanup: '● Recovery',
   results: '○ Finished',
 };
 
@@ -34,6 +37,9 @@ export function GamesScreen() {
   const [cloneTarget, setCloneTarget] = useState<GameEntry | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // #90: the just-deleted game while its 20-minute undo is live. Session-only — this is the
+  // "wait, no" affordance, not a recycle bin.
+  const [undoTarget, setUndoTarget] = useState<{ id: string; name: string } | null>(null);
 
   const loadGames = useCallback(async () => {
     if (!user) return;
@@ -75,10 +81,21 @@ export function GamesScreen() {
     }
   }
 
+  /**
+   * #90: delete a game. A game that never started is removed for good; a **finished** one
+   * is soft-deleted with a 20-minute undo.
+   *
+   * The confirmation says out loud that other members lose their history too — that is the
+   * part a GM deleting "their" game doesn't otherwise think about, and it is the reason
+   * there's an undo at all.
+   */
   async function handleDelete(entry: GameEntry) {
+    const finished = gamePhase(entry.game) === 'results';
     if (
       !window.confirm(
-        `Delete "${entry.game.name}"? This permanently removes the game, its checkpoints, and all members. This cannot be undone.`
+        finished
+          ? `Delete "${entry.game.name}"?\n\nThis removes the game for EVERYONE — every player who took part loses their record of it, not just you. You have 20 minutes to undo it, then it is gone for good.`
+          : `Delete "${entry.game.name}"? This permanently removes the game, its checkpoints, and all members. This cannot be undone.`
       )
     ) {
       return;
@@ -87,10 +104,24 @@ export function GamesScreen() {
     try {
       await deleteGame(entry.game.id);
       setGames((prev) => prev.filter((g) => g.game.id !== entry.game.id));
+      if (finished) setUndoTarget({ id: entry.game.id, name: entry.game.name });
     } catch (err) {
       setError(friendlyError(err));
     } finally {
       setBusyId(null);
+    }
+  }
+
+  /** #90: put a soft-deleted game back. Any GM may, inside the 20-minute window. */
+  async function handleUndoDelete() {
+    if (!undoTarget) return;
+    const target = undoTarget;
+    setUndoTarget(null);
+    try {
+      await undoDeleteGame(target.id);
+      await loadGames();
+    } catch (err) {
+      setError(friendlyError(err));
     }
   }
 
@@ -131,6 +162,30 @@ export function GamesScreen() {
         <>
           {error && <p className="error-text">{error}</p>}
 
+          {/* #90: the undo. The game is already gone from everyone's list — this is the
+              20-minute window in which that is still reversible, and saying so is the
+              point: a GM who has just wiped a dozen people's history should be able to see
+              that they can put it back. */}
+          {undoTarget && (
+            <div
+              className="card"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 12,
+                padding: '12px 14px', marginBottom: 14,
+              }}
+            >
+              <span style={{ flex: 1, fontSize: 13, color: 'var(--text-secondary)' }}>
+                “{undoTarget.name}” deleted for everyone. You have 20 minutes to undo.
+              </span>
+              <button className="btn btn--secondary" style={{ padding: '6px 14px' }} onClick={handleUndoDelete}>
+                Undo
+              </button>
+              <button className="btn btn--ghost" style={{ padding: '6px 10px' }} onClick={() => setUndoTarget(null)}>
+                ✕
+              </button>
+            </div>
+          )}
+
           {archivedGames.length > 0 && (
             <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
               <button
@@ -163,7 +218,9 @@ export function GamesScreen() {
                 const isGM = entry.role === 'gm';
                 // GM-only actions. A player entry is history: it can be archived (a
                 // self-update on their own member doc) but never cloned or deleted.
-                const canDelete = isGM && (phase === 'setup' || phase === 'lobby');
+                // #90: a **finished** game is deletable too now — soft, with an undo. A
+                // game in play still is not: the guard was relaxed, not removed.
+                const canDelete = isGM && (phase === 'setup' || phase === 'lobby' || phase === 'results');
                 const canArchive = phase === 'results';
                 const busy = busyId === entry.game.id;
                 return (

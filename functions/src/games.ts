@@ -398,10 +398,21 @@ export const joinGameByCode = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Delete a game that hasn't started yet (phase `setup` or `lobby`). GM-only.
- * Game docs are not client-deletable (`allow delete: if false`) and Firestore
- * doesn't cascade subcollections, so this runs server-side and recursively
- * removes the game plus its members/checkpoints/locations/arrivals.
+ * Delete a game. GM-only, and **any** GM of the game may do it — not only the creator
+ * (ROADMAP #90). There is no age requirement.
+ *
+ * Two behaviours, chosen by the phase:
+ *
+ *  - **A game that never started** (`setup`/`lobby`) is hard-deleted immediately, as
+ *    before. There is nothing to recover and nobody has a history in it.
+ *  - **A finished game** (`results`) is **soft-deleted**: `deletedAt`/`deletedBy` are
+ *    stamped and every document survives untouched. It disappears from everyone's list at
+ *    once, a GM can undo it for 20 minutes, and `sweepDeletedGames` hard-deletes it after
+ *    that. Leaving the data in place is what makes undo trivial.
+ *
+ * **A game in play still cannot be deleted at all** — the existing guard is relaxed, not
+ * removed. Game docs aren't client-deletable (`allow delete: if false`) and Firestore
+ * doesn't cascade subcollections, so the hard delete runs here.
  */
 export const deleteGame = functions.https.onCall(async (data, context) => {
   const uid = requireAuth(context);
@@ -426,19 +437,118 @@ export const deleteGame = functions.https.onCall(async (data, context) => {
   }
 
   const game = gameSnap.data() ?? {};
-  // Resolve phase the same way gameService.gamePhase() does, then refuse to
-  // delete anything that has started: only `setup`/`lobby` games are removable.
+  // Resolve phase the same way gameService.gamePhase() does.
   const phase = game.phase ?? (game.status === 'ended' ? 'results' : 'play');
-  if (game.startedAt || phase === 'play' || phase === 'results') {
+  const finished = phase === 'results' || game.status === 'ended';
+  const neverStarted = !game.startedAt && (phase === 'setup' || phase === 'lobby');
+
+  if (!finished && !neverStarted) {
     throw new functions.https.HttpsError(
       'failed-precondition',
-      'Only games that haven\'t started can be deleted. Archive a finished game instead.'
+      'A game in progress can\'t be deleted. End it first.'
     );
   }
 
-  await db.recursiveDelete(gameRef);
-  return { deleted: true };
+  if (neverStarted) {
+    await db.recursiveDelete(gameRef);
+    return { deleted: true, soft: false };
+  }
+
+  // Soft delete. Idempotent: re-deleting an already-deleted game leaves the original
+  // stamp, so a double-tap can't quietly extend the recovery window.
+  if (game.deletedAt) return { deleted: true, soft: true };
+  await gameRef.update({
+    deletedAt: admin.firestore.FieldValue.serverTimestamp(),
+    deletedBy: uid,
+  });
+  functions.logger.info(`[audit] game ${gameId} soft-deleted by ${uid} — recoverable for 20 min`);
+  return { deleted: true, soft: true };
 });
+
+/**
+ * Undo a soft delete (ROADMAP #90) within the 20-minute window. Any GM of the game may
+ * undo it, not only whoever deleted it — the person who notices the mistake is the one who
+ * should be able to fix it.
+ *
+ * Refused once the window has passed, because at that point the sweep may already have run
+ * and a "success" would be a lie. `sweepDeletedGames` is the authority on the deadline; the
+ * check here is the same arithmetic, done early so a doomed undo fails loudly.
+ */
+export const undoDeleteGame = functions.https.onCall(async (data, context) => {
+  const uid = requireAuth(context);
+  const gameId = String(data?.gameId ?? '').trim();
+  if (!gameId) throw new functions.https.HttpsError('invalid-argument', 'A game id is required.');
+
+  const db = admin.firestore();
+  const gameRef = db.collection('games').doc(gameId);
+  const [gameSnap, memberSnap] = await Promise.all([
+    gameRef.get(),
+    gameRef.collection('members').doc(uid).get(),
+  ]);
+
+  if (!gameSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'That game has already been deleted for good.');
+  }
+  if (!memberSnap.exists || memberSnap.data()?.role !== 'gm') {
+    throw new functions.https.HttpsError('permission-denied', 'Only a Game Master can restore this game.');
+  }
+
+  const deletedAt = gameSnap.data()?.deletedAt as admin.firestore.Timestamp | undefined;
+  if (!deletedAt) return { restored: true }; // never deleted — nothing to undo
+  if (Date.now() - deletedAt.toMillis() > DELETE_UNDO_WINDOW_MS) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'The 20-minute window to restore this game has passed.'
+    );
+  }
+
+  await gameRef.update({ deletedAt: null, deletedBy: null });
+  functions.logger.info(`[audit] game ${gameId} restored by ${uid}`);
+  return { restored: true };
+});
+
+/**
+ * ROADMAP #90: how long a soft-deleted game can be recovered. Mirrors
+ * `DELETE_UNDO_WINDOW_MS` in `types/index.ts` — functions/ can't import the shared types.
+ */
+const DELETE_UNDO_WINDOW_MS = 20 * 60 * 1000;
+
+/**
+ * Hard-delete soft-deleted games once their recovery window has passed (ROADMAP #90).
+ *
+ * Runs every minute so a game vanishes for good close to its 20-minute mark rather than
+ * lingering for an hour. Reuses `deleteGame`'s `recursiveDelete`, and **also clears the
+ * game's Storage objects** — the ration-photo purge normally runs on the end transition,
+ * which a game deleted from `results` may already be past, and the #42 arena overlay is up
+ * to 15 MB that nothing else would ever remove.
+ *
+ * Same scheduled-sweep shape as `rationPings` and `starvationSweep`, so no new
+ * infrastructure.
+ */
+export const sweepDeletedGames = functions.pubsub
+  .schedule('every 1 minutes')
+  .onRun(async () => {
+    const db = admin.firestore();
+    const cutoff = admin.firestore.Timestamp.fromMillis(Date.now() - DELETE_UNDO_WINDOW_MS);
+    const due = await db.collection('games').where('deletedAt', '<=', cutoff).get();
+    if (due.empty) return null;
+
+    await Promise.all(
+      due.docs.map(async (gameDoc) => {
+        try {
+          await Promise.allSettled([
+            admin.storage().bucket().deleteFiles({ prefix: `games/${gameDoc.id}/`, force: true }),
+          ]);
+          await db.recursiveDelete(gameDoc.ref);
+          functions.logger.info(`[audit] game ${gameDoc.id} hard-deleted — undo window expired`);
+        } catch (e) {
+          // One bad game must not stall the others; the next sweep retries it in a minute.
+          functions.logger.error(`[sweepDeletedGames] failed for ${gameDoc.id}`, e);
+        }
+      })
+    );
+    return null;
+  });
 
 /**
  * Reset a **practice** game (ROADMAP #43) so a dress rehearsal can be re-run. Clears all

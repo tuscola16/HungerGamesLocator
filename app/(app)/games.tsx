@@ -8,7 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/Button';
 import { Colors } from '@/constants/colors';
-import { getMyGames, gamePhase, deleteGame, cloneGame, setGameArchived, type MyGameEntry } from '@/services/gameService';
+import { getMyGames, gamePhase, deleteGame, undoDeleteGame, cloneGame, setGameArchived, type MyGameEntry } from '@/services/gameService';
 import { getFcmToken } from '@/services/notificationService';
 import { friendlyError } from '@/services/errorUtils';
 
@@ -16,6 +16,10 @@ const PHASE_TEXT: Record<string, string> = {
   setup: '● Setting up',
   lobby: '● Lobby open',
   play: '● In play',
+  // #41/#84: both of these already existed as phases and neither had a label here, so a
+  // game in the showdown or in recovery showed a blank status line on the list.
+  endgame: '● Final showdown',
+  cleanup: '● Recovery',
   results: '○ Finished',
 };
 
@@ -32,6 +36,11 @@ export default function GamesScreen() {
   const [cloneTarget, setCloneTarget] = useState<GameEntry | null>(null);
   const [cloneName, setCloneName] = useState('');
   const [cloneBusy, setCloneBusy] = useState(false);
+  // #90: the just-deleted game, while its 20-minute undo is still live. Session-only on
+  // purpose — this is the "wait, no" affordance, not a recycle bin. A GM who navigates
+  // away and changes their mind can still call `undoDeleteGame`; they just need the link,
+  // which is the correct amount of friction for un-deleting something.
+  const [undoTarget, setUndoTarget] = useState<{ id: string; name: string } | null>(null);
 
   const loadGames = useCallback(async () => {
     if (!user) return;
@@ -80,10 +89,21 @@ export default function GamesScreen() {
     }
   }
 
+  /**
+   * #90: delete a game. A game that never started is removed for good; a **finished** one
+   * is soft-deleted with a 20-minute window in which any GM can undo it.
+   *
+   * The confirmation says out loud that **other members lose their history too** — that is
+   * the part a GM deleting "their" game doesn't otherwise think about, and it is the whole
+   * reason there's an undo.
+   */
   function confirmDelete(entry: GameEntry) {
+    const finished = gamePhase(entry.game) === 'results';
     Alert.alert(
       `Delete "${entry.game.name}"?`,
-      'This permanently removes the game, its checkpoints, and all members for everyone. This cannot be undone.',
+      finished
+        ? 'This removes the game for EVERYONE — every player who took part loses their record of it, not just you. You have 20 minutes to undo it, then it is gone for good.'
+        : 'This permanently removes the game, its checkpoints, and all members for everyone. This cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -93,6 +113,7 @@ export default function GamesScreen() {
             try {
               await deleteGame(entry.game.id);
               setGames((prev) => prev.filter((g) => g.game.id !== entry.game.id));
+              if (finished) setUndoTarget({ id: entry.game.id, name: entry.game.name });
             } catch (err) {
               Alert.alert('Error', friendlyError(err));
             }
@@ -100,6 +121,19 @@ export default function GamesScreen() {
         },
       ]
     );
+  }
+
+  /** #90: put a soft-deleted game back. Any GM may, inside the 20-minute window. */
+  async function undoDelete() {
+    if (!undoTarget) return;
+    const target = undoTarget;
+    setUndoTarget(null);
+    try {
+      await undoDeleteGame(target.id);
+      await loadGames();
+    } catch (err) {
+      Alert.alert('Could not restore', friendlyError(err));
+    }
   }
 
   function startClone(entry: GameEntry) {
@@ -128,7 +162,9 @@ export default function GamesScreen() {
   function openActions(entry: GameEntry) {
     const phase = gamePhase(entry.game);
     const isGM = entry.role === 'gm';
-    const canDelete = isGM && (phase === 'setup' || phase === 'lobby');
+    // #90: a **finished** game is now deletable too — soft, with an undo. A game in play
+    // still isn't: the guard was relaxed, not removed. Any GM of the game may do it.
+    const canDelete = isGM && (phase === 'setup' || phase === 'lobby' || phase === 'results');
     const canArchive = phase === 'results';
 
     const options: { text: string; style?: 'cancel' | 'destructive'; onPress?: () => void }[] = [];
@@ -209,6 +245,25 @@ export default function GamesScreen() {
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* #90: the undo. The game is already gone from everyone's list — this is the
+          20-minute window in which that is still reversible, and saying so is the point:
+          a GM who has just wiped a dozen people's history should be able to see that they
+          can put it back. */}
+      {undoTarget && (
+        <View style={styles.undoBar}>
+          <Ionicons name="trash-outline" size={18} color={Colors.textSecondary} />
+          <Text style={styles.undoText} numberOfLines={2}>
+            “{undoTarget.name}” deleted for everyone. You have 20 minutes to undo.
+          </Text>
+          <TouchableOpacity onPress={undoDelete} hitSlop={8}>
+            <Text style={styles.undoAction}>UNDO</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setUndoTarget(null)} hitSlop={8}>
+            <Ionicons name="close" size={18} color={Colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+      )}
 
       <FlatList
         data={visibleGames}
@@ -307,6 +362,15 @@ export default function GamesScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  // #90: the soft-delete undo bar.
+  undoBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginHorizontal: 24, marginBottom: 12, paddingVertical: 12, paddingHorizontal: 14,
+    borderRadius: 10, backgroundColor: Colors.surface,
+    borderWidth: 1, borderColor: Colors.border,
+  },
+  undoText: { flex: 1, color: Colors.textSecondary, fontSize: 13, lineHeight: 18 },
+  undoAction: { color: Colors.primary, fontSize: 13, fontWeight: '800', letterSpacing: 0.5 },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
