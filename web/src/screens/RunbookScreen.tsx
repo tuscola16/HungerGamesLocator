@@ -9,6 +9,7 @@ import { Modal } from '@/components/Modal';
 import { EntryEditor } from '@/components/EntryEditor';
 import { friendlyError } from '@/services/errorUtils';
 import { requirePositiveInt } from '@shared/common/gameConfigValidation';
+import { isInertEntry as isInert } from '@shared/common/runbook';
 import type {
   RunbookEntry, TimedBound, ScheduledEvent, ScheduledActionType, Checkpoint,
   CheckpointKind, RunbookTriggerType,
@@ -41,11 +42,18 @@ export function RunbookScreen() {
   const [cpFilter, setCpFilter] = useState<string>('all');
   const [kindFilter, setKindFilter] = useState<Set<CheckpointKind>>(() => new Set());
   const [triggerFilter, setTriggerFilter] = useState<Set<RunbookTriggerType>>(() => new Set());
-  const filtersActive = cpFilter !== 'all' || kindFilter.size > 0 || triggerFilter.size > 0;
+  // #96: find the inert entries again at start time. An entry authored during setup, before
+  // anyone had joined, sits targeted-but-unassigned and fires for nobody until someone is
+  // picked — which is a legitimate state to start a game in, and therefore one a GM needs to
+  // be able to *find* rather than stumble over.
+  const [needsPlayersOnly, setNeedsPlayersOnly] = useState(false);
+  const filtersActive =
+    cpFilter !== 'all' || kindFilter.size > 0 || triggerFilter.size > 0 || needsPlayersOnly;
   function clearFilters() {
     setCpFilter('all');
     setKindFilter(new Set());
     setTriggerFilter(new Set());
+    setNeedsPlayersOnly(false);
   }
 
   // #61: clock-triggered announcements (broadcasts, player-count, gear drops, GM reminders).
@@ -79,13 +87,14 @@ export function RunbookScreen() {
       (cpFilter === 'all' || e.checkpointId === cpFilter)
       && (kindFilter.size === 0 || kindFilter.has(e.effect?.kind ?? 'gm-notify'))
       && (triggerFilter.size === 0 || triggerFilter.has(e.trigger))
+      && (!needsPlayersOnly || isInert(e))
     );
     const timed = visible
       .filter((e) => e.trigger === 'timed')
       .sort((a, b) => byPriority(a, b) || startMinutes(a) - startMinutes(b));
     const alwaysOn = visible.filter((e) => e.trigger !== 'timed').sort(byPriority);
     return { alwaysOn, timed, shown: visible.length };
-  }, [runbookEntries, cpFilter, kindFilter, triggerFilter]);
+  }, [runbookEntries, cpFilter, kindFilter, triggerFilter, needsPlayersOnly]);
 
   const editing = selected && !selected.startsWith('new:')
     ? runbookEntries.find((e) => e.id === selected) ?? null
@@ -125,6 +134,8 @@ export function RunbookScreen() {
               onKindFilter={setKindFilter}
               triggerFilter={triggerFilter}
               onTriggerFilter={setTriggerFilter}
+              needsPlayersOnly={needsPlayersOnly}
+              onNeedsPlayersOnly={setNeedsPlayersOnly}
               active={filtersActive}
               onClear={clearFilters}
               shown={shown}
@@ -417,7 +428,7 @@ function NewEntryButton({ checkpoints, onPick }: { checkpoints: { id: string; na
 /** #98a: sidebar filters — checkpoint, effect kind and trigger. View state only. */
 function FilterBar({
   checkpoints, cpFilter, onCpFilter, kindFilter, onKindFilter,
-  triggerFilter, onTriggerFilter, active, onClear, shown, total,
+  triggerFilter, onTriggerFilter, needsPlayersOnly, onNeedsPlayersOnly, active, onClear, shown, total,
 }: {
   checkpoints: Checkpoint[];
   cpFilter: string;
@@ -426,6 +437,9 @@ function FilterBar({
   onKindFilter: (v: Set<CheckpointKind>) => void;
   triggerFilter: Set<RunbookTriggerType>;
   onTriggerFilter: (v: Set<RunbookTriggerType>) => void;
+  /** #96: show only inert entries — targeted, but nobody assigned yet. */
+  needsPlayersOnly: boolean;
+  onNeedsPlayersOnly: (v: boolean) => void;
   active: boolean;
   onClear: () => void;
   shown: number;
@@ -496,6 +510,14 @@ function FilterBar({
             () => onTriggerFilter(toggled(triggerFilter, t))))}
       </div>
 
+      {/* #96: the entries authored during setup that still fire for nobody. This is the
+          filter that makes "warn at Start, never block" workable — the warning names them,
+          and this is how a GM finds them again. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {chip(needsPlayersOnly, 'needs-players', '🎯? Needs players',
+          () => onNeedsPlayersOnly(!needsPlayersOnly))}
+      </div>
+
       {active && (
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           {shown} of {total} shown
@@ -542,7 +564,11 @@ function Group({
               </div>
             </div>
             <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>
-              {(e.playerIds?.length ?? 0) > 0 && <span title={`Only ${e.playerIds!.length} player(s)`}>🎯 </span>}
+              {/* #96: an inert entry gets its own badge — "targeted" and "targeted at
+                  nobody" are opposite outcomes and must not share a glyph. */}
+              {isInert(e)
+                ? <span title="Targeted, but nobody assigned yet — fires for nobody">🎯? </span>
+                : (e.playerIds?.length ?? 0) > 0 && <span title={`Only ${e.playerIds!.length} player(s)`}>🎯 </span>}
               {e.revealOnFire && e.revealOnFire !== 'none' && <span title="Reveals the checkpoint when it fires">👁 </span>}
               P{e.priority ?? 0}
             </span>

@@ -24,6 +24,7 @@ import { PostGameMedia } from '@/components/PostGameMedia';
 import { friendlyError } from '@/services/errorUtils';
 import { validateGameConfig } from '@/common/gameConfigValidation';
 import { startGamePreflight } from '@/common/startPreflight';
+import { isInertEntry } from '@/common/runbook';
 import { useElapsed, useRemaining, formatDuration } from '@/hooks/useElapsed';
 import { useNow } from '@/hooks/useNow';
 import { STALE_MS, unaccountedPlayers, unaccountedReasonText } from '@/services/locationStatus';
@@ -41,7 +42,7 @@ const PHASE_LABEL: Record<string, string> = {
 
 export default function GMGameScreen() {
   const { gameId } = useLocalSearchParams<{ gameId: string }>();
-  const { game, phase, checkpoints, members, playerLocations, arrivals, rations, markers, loadGame, clearGame } = useGame();
+  const { game, phase, checkpoints, runbookEntries, members, playerLocations, arrivals, rations, markers, loadGame, clearGame } = useGame();
   const { user } = useAuth();
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('map');
@@ -206,6 +207,7 @@ export default function GMGameScreen() {
       checkpoints, // 2026-09-06: powers the too-close-checkpoints advisory
       playerCount: roster.length,
       gmHasToken,
+      inertEntries: runbookEntries.filter(isInertEntry),
       unlocatedPlayerCount: roster.length - located,
     });
 

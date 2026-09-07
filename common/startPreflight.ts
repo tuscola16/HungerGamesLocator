@@ -32,6 +32,11 @@ export interface StartPreflightInput {
   gmHasToken: boolean;
   /** Joined players who haven't reported a location fix yet (soft warning only). */
   unlocatedPlayerCount?: number;
+  /**
+   * ROADMAP #96: runbook entries that are targeted but have nobody assigned yet, and so
+   * fire for nobody. Optional; omitted by callers that don't have the runbook to hand.
+   */
+  inertEntries?: { name?: string }[];
 }
 
 export interface StartPreflightResult {
@@ -63,6 +68,21 @@ export function startGamePreflight(input: StartPreflightInput): StartPreflightRe
   }
   if (!input.gmHasToken) {
     warnings.push('No Game Master is registered for push notifications — GMs will only see alerts while actively watching the app or dashboard.');
+  }
+
+  // #96: targeted entries nobody is assigned to. **Warn, never block** — settled
+  // 2026-09-06: there are mechanics where the assignee genuinely isn't known until someone
+  // arrives somewhere, so starting with unassigned entries is legitimate. Targets can be
+  // assigned during play, which already works. This exists because an entry that silently
+  // fires for nobody is otherwise indistinguishable from one that's broken.
+  const inert = input.inertEntries ?? [];
+  if (inert.length > 0) {
+    const shown = inert.slice(0, 3).map((e) => e.name || '(unnamed)').join(', ');
+    const rest = inert.length > 3 ? `, and ${inert.length - 3} more` : '';
+    warnings.push(
+      `${inert.length} runbook ${inert.length === 1 ? 'entry is' : 'entries are'} targeted with nobody assigned, so ${inert.length === 1 ? 'it fires' : 'they fire'} for nobody: ${shown}${rest}. ` +
+      'That may be deliberate — you can assign players mid-game.'
+    );
   }
 
   // Checkpoints too close to tell apart (2026-09-06). A warning rather than a blocker:

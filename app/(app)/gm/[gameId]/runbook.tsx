@@ -8,6 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useGame } from '@/context/GameContext';
 import { Colors } from '@/constants/colors';
 import { KIND_META, KIND_ORDER, TRIGGER_META, hexToRgba } from '@/components/checkpointForm';
+import { isInertEntry } from '@/common/runbook';
 import type { CheckpointKind, RunbookEntry, RunbookTriggerType } from '@/types';
 
 /**
@@ -92,6 +93,10 @@ export default function RunbookScreen() {
     const meta = KIND_META[kind];
     const trig = TRIGGER_META[item.trigger];
     const targeted = (item.playerIds?.length ?? 0) > 0;
+    // #96: an entry authored during setup can be targeted with nobody assigned yet. That is
+    // the opposite outcome from "targeted at N players" — it fires for nobody — so it gets
+    // its own chip rather than silently reading as untargeted.
+    const inert = isInertEntry(item);
     return (
       <View style={[styles.entry, { borderLeftColor: meta.color }]}>
         <View style={styles.entryTop}>
@@ -116,14 +121,19 @@ export default function RunbookScreen() {
               <Text style={styles.metaChipText}>{timedLabel(item)}</Text>
             </View>
           )}
-          {targeted && (
+          {inert ? (
+            <View style={styles.metaChip}>
+              <Ionicons name="person-add-outline" size={12} color={Colors.warning} />
+              <Text style={[styles.metaChipText, { color: Colors.warning }]}>Needs players</Text>
+            </View>
+          ) : targeted ? (
             <View style={styles.metaChip}>
               <Ionicons name="person-outline" size={12} color={Colors.secondary} />
               <Text style={[styles.metaChipText, { color: Colors.secondary }]}>
                 {item.playerIds!.length} player{item.playerIds!.length !== 1 ? 's' : ''}
               </Text>
             </View>
-          )}
+          ) : null}
           {item.revealOnFire && item.revealOnFire !== 'none' && (
             <View style={styles.metaChip}>
               <Ionicons name="eye-outline" size={12} color={Colors.textSecondary} />

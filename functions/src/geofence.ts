@@ -32,6 +32,7 @@ interface RunbookEntry {
   startAt?: TimedBound;
   endAt?: TimedBound;
   playerIds?: string[] | null; // #80: only these players can trip it (empty/absent = anyone)
+  targeted?: boolean; // #96: meant to be targeted; with an empty playerIds it is INERT (fires for nobody)
   revealOnFire?: 'none' | 'triggerer' | 'targeted' | 'all'; // #80: reveal the checkpoint on fire
   createdAt?: admin.firestore.Timestamp;
 }
@@ -100,12 +101,22 @@ function eligibleEffect(
 }
 
 /**
- * #80: may this player trip this entry? An untargeted entry (no `playerIds`, or an empty
- * array) is open to everyone; a targeted one only fires for the named members — anyone else
- * crossing falls through to the next-highest-priority entry.
+ * #80/#96: may this player trip this entry? In order:
+ *
+ *  1. **`targeted` with no `playerIds`** → **nobody** trips it. The entry is *inert*: it was
+ *     authored during `setup`, before anyone had joined, and its assignees haven't been
+ *     chosen yet (#96). Previously this state was unrepresentable, which is why the editor
+ *     refused to save it — an unassigned targeted entry that reached the server would have
+ *     fired for the entire field.
+ *  2. **`playerIds` non-empty** → only those uids. Anyone else crossing falls through to the
+ *     next-highest-priority entry (#80).
+ *  3. **Otherwise** → anyone. Unchanged, and what an entry with neither flag still does.
  */
 function entryTargetsPlayer(e: RunbookEntry, playerId: string): boolean {
-  return !Array.isArray(e.playerIds) || e.playerIds.length === 0 || e.playerIds.includes(playerId);
+  const ids = Array.isArray(e.playerIds) ? e.playerIds : [];
+  if (e.targeted === true && ids.length === 0) return false;
+  if (ids.length > 0) return ids.includes(playerId);
+  return true;
 }
 
 /**

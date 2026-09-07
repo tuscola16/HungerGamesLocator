@@ -30,6 +30,7 @@ import {
 } from '@/services/checkpointKinds';
 import { validateGameConfig, requireMinInt } from '@shared/common/gameConfigValidation';
 import { startGamePreflight } from '@shared/common/startPreflight';
+import { isInertEntry } from '@shared/common/runbook';
 import { pointInBoundary } from '@shared/common/geo';
 import { deleteField } from 'firebase/firestore';
 import type {
@@ -209,6 +210,7 @@ export function GameScreen() {
       // The web GM dashboard is itself a live alert surface (the GM watching sees arrivals
       // in real time), so a GM FCM push token isn't required to start from web.
       gmHasToken: true,
+      inertEntries: runbookEntries.filter(isInertEntry),
       unlocatedPlayerCount: players.length - located,
     });
     if (blockers.length > 0) {

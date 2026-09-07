@@ -70,6 +70,8 @@ export const fireRunbookEntry = functions.https.onCall(async (data, context) => 
     effect?: RunbookEffect;
     checkpointId?: string;
     playerIds?: string[] | null;
+    /** #96: meant to be targeted; with an empty `playerIds` the entry is inert. */
+    targeted?: boolean;
     revealOnFire?: 'none' | 'triggerer' | 'targeted' | 'all';
   };
   if (entry.trigger !== 'gm-prompted') {
@@ -91,12 +93,26 @@ export const fireRunbookEntry = functions.https.onCall(async (data, context) => 
 
   // #80: an entry targeted at specific players is the default recipient set — the GM only
   // has to pick targets when they want to narrow it further for this one firing.
+  //
+  // #96: an *inert* entry (`targeted` with an empty `playerIds`) has NO default recipients.
+  // The GM must pick, exactly as crossing resolution refuses to fire it for anyone. Without
+  // this the callable would quietly do the opposite of the geofence and blast the field.
+  const inert = entry.targeted === true && !(Array.isArray(entry.playerIds) && entry.playerIds.length > 0);
   const entryTargets = Array.isArray(entry.playerIds) && entry.playerIds.length > 0
     ? entry.playerIds
     : null;
-  const defaults = entryTargets
-    ? livingPlayers.filter((m) => entryTargets.includes(m.id))
-    : livingPlayers;
+  const defaults = inert
+    ? []
+    : entryTargets
+      ? livingPlayers.filter((m) => entryTargets.includes(m.id))
+      : livingPlayers;
+
+  if (inert && !(targetPlayerIds && targetPlayerIds.length > 0)) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'This entry is targeted but has no players assigned yet — pick who it fires for.'
+    );
+  }
 
   const recipients =
     targetPlayerIds && targetPlayerIds.length > 0

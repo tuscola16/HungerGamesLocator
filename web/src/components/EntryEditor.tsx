@@ -119,7 +119,11 @@ export function EntryEditor({
   const [startAt, setStartAt] = useState<TimedBound>(entry?.startAt ?? { kind: 'game-start' });
   const [endAt, setEndAt] = useState<TimedBound>(entry?.endAt ?? { kind: 'game-end' });
   // #80: player targeting + reveal-on-fire.
-  const [targeted, setTargeted] = useState((entry?.playerIds ?? []).length > 0);
+  // #96: an entry can be targeted with nobody assigned yet, so the flag is the source of
+  // truth and the list length is only the legacy fallback for entries saved before it.
+  const [targeted, setTargeted] = useState(
+    entry?.targeted === true || (entry?.playerIds ?? []).length > 0
+  );
   const [playerIds, setPlayerIds] = useState<string[]>(entry?.playerIds ?? []);
   const [revealOnFire, setRevealOnFire] = useState<RunbookRevealScope>(entry?.revealOnFire ?? 'none');
   const [busy, setBusy] = useState(false);
@@ -141,11 +145,12 @@ export function EntryEditor({
     if (!name.trim()) { window.alert('Name this runbook entry.'); return; }
     const prio = Math.round(Number(priority) || 0);
 
-    // #80: an empty target list means "anyone" — don't store a list that fires for nobody.
-    if (targeted && playerIds.length === 0) {
-      window.alert('Pick at least one player, or switch this entry back to “Any player”.');
-      return;
-    }
+    // #96: the "pick at least one player" guard is GONE. It existed only because the server
+    // read an empty `playerIds` as "anyone", so an unassigned targeted entry would have
+    // fired for the whole field — which pushed all targeted authoring into the minutes
+    // before Start. The semantics were fixed instead of the dialog: `targeted: true` with an
+    // empty list is now an explicit INERT state that crossing resolution skips entirely, so
+    // an entry can be written during setup and assigned later, including during play.
 
     const base: Record<string, unknown> = {
       checkpointId,
@@ -154,6 +159,8 @@ export function EntryEditor({
       trigger,
       effect: cleanEffect(effect),
       // #80: who may trip it, and whether firing puts the checkpoint on their map.
+      // #96: `targeted` carries the intent even while the list is empty.
+      targeted,
       playerIds: targeted ? playerIds : null,
       revealOnFire,
     };
@@ -286,16 +293,29 @@ export function EntryEditor({
         </span>
         {targeted && (
           players.length === 0 ? (
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>No players have joined yet.</span>
+            // #96: this is now a normal, saveable state rather than a dead end. Say what it
+            // means, because "inert" is the whole point: the entry exists and fires for
+            // nobody until someone is assigned to it.
+            <span style={{ fontSize: 12, color: 'var(--warning, #D4893F)' }}>
+              No players have joined yet — save it anyway. Until you assign someone it stays
+              inert and fires for nobody, and you can assign them any time, including mid-game.
+            </span>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {players.map((p) => (
-                <label key={p.userId} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={playerIds.includes(p.userId)} onChange={() => togglePlayer(p.userId)} />
-                  <span>{p.displayName}</span>
-                </label>
-              ))}
-            </div>
+            <>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {players.map((p) => (
+                  <label key={p.userId} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={playerIds.includes(p.userId)} onChange={() => togglePlayer(p.userId)} />
+                    <span>{p.displayName}</span>
+                  </label>
+                ))}
+              </div>
+              {playerIds.length === 0 && (
+                <span style={{ fontSize: 12, color: 'var(--warning, #D4893F)' }}>
+                  Nobody assigned — this entry is inert and fires for nobody until you pick someone.
+                </span>
+              )}
+            </>
           )
         )}
       </div>

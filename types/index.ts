@@ -635,6 +635,28 @@ export interface RunbookEntry {
    */
   playerIds?: string[] | null;
   /**
+   * ROADMAP #96: this entry is *meant* to be player-targeted, even while `playerIds` is
+   * still empty.
+   *
+   * `playerIds` alone cannot express "targeted, players not chosen yet": absent, `null` and
+   * `[]` **all mean anyone**, which is why the editor used to refuse the save outright —
+   * an unassigned targeted entry reaching the server would have fired for the whole field.
+   * That pushed all targeted authoring into the minutes before Start, when the players
+   * finally exist.
+   *
+   * With this set and `playerIds` empty, the entry is **inert**: crossing resolution skips
+   * it entirely rather than falling back to "anyone", so it can be written during `setup`
+   * and filled in later — including during play, which already works and must keep working.
+   * Absent = legacy behavior (`playerIds` alone decides). Added as a new flag rather than by
+   * redefining `[]`, because entries already in the field carry empty arrays and would
+   * change behavior under a redefinition.
+   *
+   * `startPreflight` (#23) **warns** about inert entries and never blocks — some mechanics
+   * genuinely don't know the assignee until someone arrives somewhere. `cloneGame` (#65)
+   * strips targets and marks the copy inert.
+   */
+  targeted?: boolean;
+  /**
    * Reveal the entry's checkpoint on the player map when this entry fires (ROADMAP #80),
    * so the player keeps seeing the site for the rest of the game. Absent/`'none'` = no
    * reveal. The marker carries only the checkpoint's name + location, never the effect.

@@ -304,6 +304,14 @@ export const cloneGame = functions.https.onCall(async (data, context) => {
     data.checkpointId = newCheckpointId;
     delete data.firedAt;
     data.createdAt = now;
+    // #96: a clone has no members yet, so any `playerIds` it carried name people who are
+    // not in this game. Strip them and mark the copy **inert** rather than leaving an empty
+    // list, which the server would read as "anyone" — a targeted trap silently becoming a
+    // field-wide one is precisely the failure #96 exists to close.
+    if (Array.isArray(data.playerIds) && data.playerIds.length > 0) {
+      data.playerIds = [];
+      data.targeted = true;
+    }
     batch.set(newRef.collection('runbook').doc(), data);
   }
 
