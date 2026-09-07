@@ -73,7 +73,10 @@ export default function RunbookScreen() {
     return next;
   }
 
-  const cpName = (id: string) => checkpoints.find((c) => c.id === id)?.name ?? 'Unknown checkpoint';
+  // #97: an unarmed trap kit has no site yet — the arming player chooses it by standing
+  // there. Say so, rather than showing it as a broken reference to a missing checkpoint.
+  const cpName = (id: string | undefined) =>
+    !id ? 'Not placed yet' : checkpoints.find((c) => c.id === id)?.name ?? 'Unknown checkpoint';
 
   const visible = useMemo(() => {
     const byPriority = (a: RunbookEntry, b: RunbookEntry) => (b.priority ?? 0) - (a.priority ?? 0);
@@ -134,6 +137,23 @@ export default function RunbookScreen() {
               </Text>
             </View>
           ) : null}
+          {/* #97: a trap kit reads differently depending on whether a player has deployed
+              it yet. Unarmed shows the code, because a GM working from a phone in the field
+              is often the person writing it on the card. */}
+          {item.trapKitCode && (
+            <View style={styles.metaChip}>
+              <Ionicons
+                name={item.armedAt ? 'flash' : 'card-outline'}
+                size={12}
+                color={item.armedAt ? Colors.danger : Colors.textSecondary}
+              />
+              <Text style={[styles.metaChipText, item.armedAt ? { color: Colors.danger } : null]}>
+                {item.armedAt
+                  ? `Armed by ${item.armedByName ?? 'a player'}`
+                  : `Kit ${item.trapKitCode}`}
+              </Text>
+            </View>
+          )}
           {item.revealOnFire && item.revealOnFire !== 'none' && (
             <View style={styles.metaChip}>
               <Ionicons name="eye-outline" size={12} color={Colors.textSecondary} />

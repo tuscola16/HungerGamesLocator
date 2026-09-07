@@ -509,6 +509,9 @@ function SetupView({
   );
   const entriesByCp = new Map<string, RunbookEntry[]>();
   for (const e of runbookEntries) {
+    // #97: an unarmed trap kit has no checkpoint yet — the arming *player* chooses the
+    // site by standing at it. It belongs to no pin until then.
+    if (!e.checkpointId) continue;
     const list = entriesByCp.get(e.checkpointId) ?? [];
     list.push(e);
     entriesByCp.set(e.checkpointId, list);

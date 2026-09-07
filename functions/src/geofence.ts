@@ -34,8 +34,22 @@ interface RunbookEntry {
   playerIds?: string[] | null; // #80: only these players can trip it (empty/absent = anyone)
   targeted?: boolean; // #96: meant to be targeted; with an empty playerIds it is INERT (fires for nobody)
   revealOnFire?: 'none' | 'triggerer' | 'targeted' | 'all'; // #80: reveal the checkpoint on fire
+  // #97 player-armed traps.
+  trapKitCode?: string;
+  excludePlayerIds?: string[] | null; // who the arming player spared
+  maxVictims?: number; // GM-set; absent → 1
+  armedBy?: string | null;
+  armedAt?: admin.firestore.Timestamp | null;
   createdAt?: admin.firestore.Timestamp;
 }
+
+/**
+ * #97: how long after the FIRST victim's arrival other players can still be caught by the
+ * same trap. Not rolling — measured from the first, so a trap can't be walked open
+ * indefinitely by a trickle of arrivals. Mirrors `TRAP_COARRIVAL_WINDOW_MS` in
+ * types/index.ts (functions/ can't import the shared types).
+ */
+const TRAP_COARRIVAL_WINDOW_MS = 15_000;
 
 interface CheckpointReveal {
   trigger?: 'player' | 'gm' | 'timed';
@@ -113,10 +127,47 @@ function eligibleEffect(
  *  3. **Otherwise** → anyone. Unchanged, and what an entry with neither flag still does.
  */
 function entryTargetsPlayer(e: RunbookEntry, playerId: string): boolean {
+  // #97: a player-armed trap spares the people its armer named — and, always, the armer
+  // themselves, regardless of the list. An excluded player falls through as if the entry
+  // weren't there: no effect, no arrival ping that hints at it, no "you avoided something".
+  // They must never learn it was here.
+  if (e.armedBy === playerId) return false;
+  if (Array.isArray(e.excludePlayerIds) && e.excludePlayerIds.includes(playerId)) return false;
+
   const ids = Array.isArray(e.playerIds) ? e.playerIds : [];
   if (e.targeted === true && ids.length === 0) return false;
   if (ids.length > 0) return ids.includes(playerId);
   return true;
+}
+
+/**
+ * #97: has this trap already caught everyone it can?
+ *
+ * The rule is "up to `maxVictims` players, all of whom arrive within 15 seconds of the
+ * first" — a **co-arrival window**, which the `fixed-order` `queueSlots` model cannot
+ * express (those are per-distinct-arriver ordinals with no clock at all). Everyone caught
+ * gets the same effect; there is no weaker second slot.
+ *
+ * `entryTrips` is already the authoritative "what actually fired for whom" log, so it is
+ * both the victim count and the window clock — no extra field, and no write on a refusal.
+ * Only consulted for an armed trap, so an ordinary entry costs nothing.
+ */
+async function trapAdmitsVictim(
+  entryTripsCol: FirebaseFirestore.CollectionReference,
+  e: RunbookEntry,
+  nowMs: number
+): Promise<boolean> {
+  const max = typeof e.maxVictims === 'number' && e.maxVictims > 0 ? e.maxVictims : 1;
+  const prior = await entryTripsCol.where('entryId', '==', e.id).get();
+  if (prior.empty) return true; // first victim — they start the window
+  if (prior.size >= max) return false;
+  // The window runs from the FIRST victim, so a trickle of later arrivals can't hold it
+  // open. A trip with no readable timestamp (a serverTimestamp still resolving) is treated
+  // as "just now", which errs toward catching rather than silently sparing.
+  const firstMs = Math.min(
+    ...prior.docs.map((d) => (d.data().trippedAt as admin.firestore.Timestamp | undefined)?.toMillis?.() ?? nowMs)
+  );
+  return nowMs - firstMs <= TRAP_COARRIVAL_WINDOW_MS;
 }
 
 /**
@@ -762,9 +813,15 @@ export const onLocationUpdate = functions
     ): Promise<number> {
       const cpName = cp.name;
       for (const e of [...entries].sort(byPriorityThenAge)) {
-        if (!entryTargetsPlayer(e, userId)) continue; // #80: not this player's entry
+        if (!entryTargetsPlayer(e, userId)) continue; // #80/#97: not this player's entry
         const effect = eligibleEffect(e, ordinal, nowMs, startedMs);
         if (!effect) continue;
+        // #97: an armed trap has a victim cap and a 15 s co-arrival window. Checked here,
+        // after the cheap filters, so an ordinary entry never pays for the extra read — and
+        // a spent trap falls through to the next-highest entry rather than firing nothing.
+        if (e.trapKitCode && e.armedAt && !(await trapAdmitsVictim(entryTripsCol, e, nowMs))) {
+          continue;
+        }
         try {
           // Denormalized so the GM notification feed (#73) reads it directly — one row per
           // entry that *actually* fired, with the delivered effect's kind/message.

@@ -16,6 +16,7 @@ import { LobbyPermissions } from '@/components/LobbyPermissions';
 import { RationPanel } from '@/components/RationPanel';
 import { PostGameMedia } from '@/components/PostGameMedia';
 import { PlayerRoster } from '@/components/PlayerRoster';
+import { TrapKitPanel } from '@/components/TrapKitPanel';
 import { Tutorial } from '@/components/Tutorial';
 import { BroadcastsProvider } from '@/context/BroadcastsContext';
 import { DiedOverlay } from '@/components/DiedOverlay';
@@ -1127,6 +1128,11 @@ export default function PlayerGameScreen() {
                   )}
                 </>
               )}
+
+              {/* #97: a trap kit is a physical card found in the field. Arming lives on
+                  the Stats tab rather than over the map, because it is a deliberate act
+                  performed standing still, not something to fumble mid-walk. */}
+              {gameId && <TrapKitPanel gameId={gameId} roster={roster} selfId={user?.uid} />}
 
               {/* #88: who's left. Names only — the projection carries nothing else, and a
                   dead player leaves the list rather than being shown as dead, so it never

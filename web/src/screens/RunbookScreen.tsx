@@ -77,7 +77,10 @@ export function RunbookScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params]);
 
-  const cpName = (id: string) => checkpoints.find((c) => c.id === id)?.name ?? 'Unknown checkpoint';
+  // #97: an unarmed trap kit has no site yet — the arming player chooses it by standing
+  // there. Say so, rather than showing it as a broken reference to a missing checkpoint.
+  const cpName = (id: string | undefined) =>
+    !id ? 'Not placed yet' : checkpoints.find((c) => c.id === id)?.name ?? 'Unknown checkpoint';
 
   const { alwaysOn, timed, shown } = useMemo(() => {
     const byPriority = (a: RunbookEntry, b: RunbookEntry) => (b.priority ?? 0) - (a.priority ?? 0);
@@ -532,7 +535,7 @@ function Group({
 }: {
   title: string;
   entries: RunbookEntry[];
-  cpName: (id: string) => string;
+  cpName: (id: string | undefined) => string;
   selectedId: string | null;
   onSelect: (id: string) => void;
   timed?: boolean;
@@ -569,6 +572,12 @@ function Group({
               {isInert(e)
                 ? <span title="Targeted, but nobody assigned yet — fires for nobody">🎯? </span>
                 : (e.playerIds?.length ?? 0) > 0 && <span title={`Only ${e.playerIds!.length} player(s)`}>🎯 </span>}
+              {/* #97: a trap kit reads differently depending on whether a player has
+                  deployed it yet — an unarmed one is a card on a table, an armed one is
+                  live in the woods and the GM may want to undo it. */}
+              {e.trapKitCode && (e.armedAt
+                ? <span title={`Armed by ${e.armedByName ?? 'a player'}`}>🪤 </span>
+                : <span title={`Trap kit ${e.trapKitCode} — not armed yet`}>🃏 </span>)}
               {e.revealOnFire && e.revealOnFire !== 'none' && <span title="Reveals the checkpoint when it fires">👁 </span>}
               P{e.priority ?? 0}
             </span>

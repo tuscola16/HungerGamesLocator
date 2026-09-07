@@ -16,6 +16,23 @@ import type {
 
 const labelStyle = { fontSize: 12, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: 0.5 } as const;
 
+/**
+ * #97: a trap-kit code, from the same alphabet as the game join codes — no 0/O/1/I/L,
+ * because it gets hand-written on a card and read in the dark.
+ *
+ * Generated with `crypto.getRandomValues` rather than `Math.random`: this is a secret
+ * from the *players*, and the whole mechanic depends on a player not being able to arm a
+ * trap they never found. Collisions inside one game are astronomically unlikely at 32^6,
+ * and `armPlayerTrap` resolves by exact match, so a collision would at worst let one card
+ * arm the wrong pre-set trap.
+ */
+const KIT_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function generateKitCode(): string {
+  const bytes = new Uint32Array(6);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => KIT_ALPHABET[b % KIT_ALPHABET.length]).join('');
+}
+
 // --- Effect editor ---
 
 function cleanEffect(e: RunbookEffect): RunbookEffect {
@@ -126,6 +143,13 @@ export function EntryEditor({
   );
   const [playerIds, setPlayerIds] = useState<string[]>(entry?.playerIds ?? []);
   const [revealOnFire, setRevealOnFire] = useState<RunbookRevealScope>(entry?.revealOnFire ?? 'none');
+  // #97: player-armed trap kit. The code is printed on a physical card; a player who finds
+  // it arms this trap where they choose, and picks who is spared. Everything else stays the
+  // GM's — the effect, the text, the victim cap, and whether springing it reveals the site.
+  const [trapKitCode, setTrapKitCode] = useState<string | null>(entry?.trapKitCode ?? null);
+  const [maxVictims, setMaxVictims] = useState(String(entry?.maxVictims ?? 1));
+  const isKit = !!trapKitCode;
+  const armed = !!entry?.armedAt;
   const [busy, setBusy] = useState(false);
   const togglePlayer = (id: string) =>
     setPlayerIds((r) => (r.includes(id) ? r.filter((x) => x !== id) : [...r, id]));
@@ -164,6 +188,25 @@ export function EntryEditor({
       playerIds: targeted ? playerIds : null,
       revealOnFire,
     };
+    // #97: an UNARMED kit is inert and unplaced — it has no site until a player stands
+    // somewhere and enters the code, and it must not fire in the meantime. `armPlayerTrap`
+    // stamps the site and clears `targeted` when it deploys, so this only ever describes
+    // the pre-deployment state; an already-armed kit's placement is left alone.
+    if (isKit) {
+      base.trapKitCode = trapKitCode;
+      base.maxVictims = Math.max(1, Math.round(Number(maxVictims) || 1));
+      if (!armed) {
+        base.targeted = true;
+        base.playerIds = [];
+        // Same shape as the other trigger-specific clears above: drop the key on an update,
+        // omit it on a create (the create path filters `undefined` out). `deleteField()`
+        // cannot be used with a non-merging write.
+        base.checkpointId = entry ? deleteField() : undefined;
+      }
+    } else if (entry?.trapKitCode) {
+      base.trapKitCode = deleteField();
+      base.maxVictims = deleteField();
+    }
     // Trigger-specific fields (set the relevant ones; clear the rest on update).
     if (trigger === 'fixed-order') {
       base.queueSlots = slots.map((s) => (s ? cleanEffect(s) : null));
@@ -190,6 +233,35 @@ export function EntryEditor({
         const id = await addRunbookEntry(gameId, cleaned as unknown as Omit<RunbookEntry, 'id' | 'createdAt'>);
         onSaved(id);
       }
+    } catch (err) { window.alert(friendlyError(err)); }
+    finally { setBusy(false); }
+  }
+
+  /**
+   * #97: disarm a trap a player set, and re-issue a fresh code so the spent card can be
+   * replaced. Clearing `armedBy`/`armedAt` alone would leave the old code valid and the
+   * trap live at the site the player picked, so this puts the kit fully back on the shelf:
+   * unplaced, inert (#96), with no exclusions and a new code.
+   */
+  async function disarm() {
+    if (!entry) return;
+    if (!window.confirm(
+      `Disarm the trap ${entry.armedByName ?? 'a player'} set?\n\nIt stops being live, and the kit gets a new code — the old card is dead. Print the new one before you put it back out.`
+    )) return;
+    const next = generateKitCode();
+    setBusy(true);
+    try {
+      await updateRunbookEntry(gameId, entry.id, {
+        trapKitCode: next,
+        armedBy: null,
+        armedByName: null,
+        armedAt: null,
+        excludePlayerIds: null,
+        checkpointId: deleteField(),
+        targeted: true,
+        playerIds: [],
+      } as unknown as Partial<RunbookEntry>);
+      setTrapKitCode(next);
     } catch (err) { window.alert(friendlyError(err)); }
     finally { setBusy(false); }
   }
@@ -317,6 +389,94 @@ export function EntryEditor({
               )}
             </>
           )
+        )}
+      </div>
+
+      {/* #97: player-armed trap kit. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <span style={labelStyle}>Player-armed trap kit</span>
+        {!isKit ? (
+          <>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              style={{ padding: '6px 12px', fontSize: 13, alignSelf: 'flex-start' }}
+              onClick={() => setTrapKitCode(generateKitCode())}
+            >
+              🪤 Make this a trap kit
+            </button>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              Prints a code you put on a physical card. A player who finds the card arms
+              this trap where they choose, and picks who is spared — you keep the effect,
+              the text, and everything below. They never learn if it fires, or on whom.
+            </span>
+          </>
+        ) : (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <code style={{
+                fontSize: 22, fontWeight: 800, letterSpacing: 5, padding: '6px 14px',
+                borderRadius: 8, border: '1px solid var(--border)', background: 'var(--card)',
+              }}>
+                {trapKitCode}
+              </code>
+              {!armed && (
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  style={{ padding: '6px 12px', fontSize: 13 }}
+                  onClick={() => setTrapKitCode(null)}
+                >
+                  Not a kit
+                </button>
+              )}
+            </div>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              Write this on the card. Single-use — once someone arms it, that code is spent.
+              The number of traps in play is however many cards you actually put out.
+            </span>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+              <span>Can catch</span>
+              <input
+                className="input"
+                type="number"
+                min={1}
+                style={{ width: 70, padding: '4px 8px' }}
+                value={maxVictims}
+                onChange={(e) => setMaxVictims(e.target.value)}
+              />
+              <span>player(s), all arriving within 15 seconds of the first.</span>
+            </label>
+            {armed && (
+              // #97: the GM must be able to see and undo what players armed. This is the
+              // first feature where one player's action changes what another player runs
+              // into, so it is deliberately visible and reversible.
+              <div
+                className="card"
+                style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}
+              >
+                <strong style={{ fontSize: 13 }}>
+                  🪤 Armed by {entry?.armedByName ?? 'a player'}
+                  {entry?.armedAt ? ` · ${entry.armedAt.toDate().toLocaleTimeString()}` : ''}
+                </strong>
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                  {(entry?.excludePlayerIds?.length ?? 0) > 0
+                    ? `Sparing ${entry!.excludePlayerIds!.length} player(s) — plus the armer, always.`
+                    : 'Sparing nobody but the armer.'}
+                  {' '}Site: {checkpoints.find((c) => c.id === entry?.checkpointId)?.name ?? 'unknown'}.
+                </span>
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  style={{ padding: '6px 12px', fontSize: 13, alignSelf: 'flex-start', color: 'var(--danger)' }}
+                  onClick={disarm}
+                  disabled={busy}
+                >
+                  Disarm and re-issue the code
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
 

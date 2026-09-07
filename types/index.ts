@@ -596,8 +596,16 @@ export type TimedBound =
  */
 export interface RunbookEntry {
   id: string;
-  /** The checkpoint this entry is attached to. */
-  checkpointId: string;
+  /**
+   * The checkpoint this entry is attached to.
+   *
+   * **Optional while a #97 trap kit is unarmed** — the arming *player* chooses the site by
+   * standing at it, so an undeployed kit has no checkpoint yet. This is the one loosening
+   * of a previously-required field, so every path that resolves an entry must check it is
+   * present rather than assume it. In practice an unarmed kit is also inert (#96), so
+   * crossing resolution never reaches it.
+   */
+  checkpointId?: string;
   /** GM-facing label, e.g. "Sponsor drop" or "Midnight hazard". */
   name: string;
   /** Higher wins on a crossing; also the primary sidebar sort key. */
@@ -662,8 +670,61 @@ export interface RunbookEntry {
    * reveal. The marker carries only the checkpoint's name + location, never the effect.
    */
   revealOnFire?: RunbookRevealScope;
+
+  // --- ROADMAP #97: player-armed traps ---
+  /**
+   * The code printed on the physical **trap kit** — usually a card the GM puts out in the
+   * field. A player who finds one arms this pre-set trap by entering the code while standing
+   * near the site they want it at.
+   *
+   * **Single-use**: once `armedAt` is stamped the code can't be armed again, and that is the
+   * whole quota mechanism. There is no per-player limit — the bound is physical, i.e. how
+   * many cards the GM actually put out.
+   *
+   * **A secret on paper.** Generated from the same alphabet as the game codes (no
+   * 0/O/1/I/L), and never enumerable by a client: `armPlayerTrap` takes a code and returns
+   * success or failure, and no callable ever lists kits. `runbook` stays GM-read-only, so a
+   * player holding one card cannot discover a trap they never found.
+   */
+  trapKitCode?: string;
+  /**
+   * Set by the **arming player**: who is spared. There is no include list for a trap — you
+   * name who is safe, everyone else is fair game, and that is what makes warning your
+   * friends out of band mean something in the app. An excluded player who crosses sees
+   * *nothing at all* — no effect, no "you avoided something" — so they never learn it was
+   * there. The armer is implicitly excluded regardless of this list.
+   */
+  excludePlayerIds?: string[] | null;
+  /**
+   * GM-set: how many players one trap can catch. Victims after the first must arrive within
+   * `TRAP_COARRIVAL_WINDOW_MS` of them, and all of them get the same effect — there is no
+   * weaker second slot. Absent → 1. This is a *co-arrival* window, which `fixed-order`
+   * `queueSlots` cannot express (those are per-distinct-arriver ordinals with no clock).
+   */
+  maxVictims?: number;
+  /**
+   * Who deployed it and when. GM-auditable — the GM can see and undo what players armed,
+   * which matters because this is the first feature where one player's action changes what
+   * another player runs into. **Never shown to players, the armer included**: with a real
+   * trap you'd have to watch it happen, and the mechanic matches.
+   */
+  armedBy?: string | null;
+  armedByName?: string | null;
+  armedAt?: FsTimestamp | null;
   createdAt: FsTimestamp;
 }
+
+/**
+ * ROADMAP #97: how long after the *first* victim's arrival other players can still be
+ * caught by the same trap (not rolling). The nearest precedent is #5's same-district
+ * suppression — the same recent-arrivals query, used to *include* rather than to withhold.
+ */
+export const TRAP_COARRIVAL_WINDOW_MS = 15_000;
+/**
+ * ROADMAP #97: how close the arming player must be to a checkpoint to deploy a kit there.
+ * Not standing exactly on it — #82 measured why GPS in these woods can't support tighter.
+ */
+export const TRAP_ARM_RADIUS_M = 100;
 
 /**
  * Who a fired runbook entry reveals its checkpoint to (ROADMAP #80). Orthogonal to the

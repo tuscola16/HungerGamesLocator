@@ -13,6 +13,7 @@ export { submitRation } from './rations';
 export { rationPings } from './rationPings';
 export { starvationSweep } from './starvation';
 export { fireRunbookEntry } from './runbook';
+export { armPlayerTrap } from './traps';
 export { rearmCheckpoint } from './rearm';
 export { onGameStartProjectMarkers } from './markers';
 export { onGameMediaWrite } from './media';

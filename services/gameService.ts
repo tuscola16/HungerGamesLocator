@@ -604,6 +604,25 @@ export async function deleteGame(gameId: string): Promise<void> {
   await callable({ gameId });
 }
 
+/**
+ * Arm a player trap kit (#97). The player enters the code printed on the physical card
+ * while standing near the site they want it at; the server resolves *which* site from their
+ * own last location fix, so the arming UI never has to be handed checkpoint coordinates.
+ *
+ * `excludePlayerIds` is who the armer **spares** — there is no include list. The armer is
+ * always spared regardless. Returns the site's name and nothing else: never the effect,
+ * never who else is exposed, and never whether it has since fired.
+ */
+export async function armPlayerTrap(
+  gameId: string,
+  code: string,
+  excludePlayerIds: string[]
+): Promise<{ checkpointName: string }> {
+  const callable = httpsCallable(functions, 'armPlayerTrap');
+  const res = await callable({ gameId, code, excludePlayerIds });
+  return res.data as { checkpointName: string };
+}
+
 /** Put a soft-deleted game back (#90), inside the 20-minute window. Any GM may. */
 export async function undoDeleteGame(gameId: string): Promise<void> {
   const callable = httpsCallable(functions, 'undoDeleteGame');

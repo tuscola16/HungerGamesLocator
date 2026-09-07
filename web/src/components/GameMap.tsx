@@ -66,6 +66,9 @@ const COLORS = {
 function groupEntries(entries: RunbookEntry[]): Map<string, RunbookEntry[]> {
   const m = new Map<string, RunbookEntry[]>();
   for (const e of entries) {
+    // #97: an unarmed trap kit has no checkpoint yet — the arming *player* chooses the
+    // site by standing at it. It belongs to no pin until then.
+    if (!e.checkpointId) continue;
     const list = m.get(e.checkpointId) ?? [];
     list.push(e);
     m.set(e.checkpointId, list);
