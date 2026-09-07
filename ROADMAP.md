@@ -435,6 +435,14 @@ game; `locationTrail` was **off**, so gap lengths are still unmeasured.
   `trustedStepsSincePrev` alongside `stepsSincePrev` for exactly this.
 - **Fix-gap length is still unmeasured.** The original question — how long does a player actually go
   without a usable fix — needs a trail, and Stonedam ran without one. It is on by default now.
+
+> **No capture exists yet for either of the two bullets above.** All of this work — the trail
+> defaulting on, `fixGapMs` / `trustedStepsSincePrev`, and the retention fix that stops the
+> arrivals and trip latches being purged — landed **after** the 2026-09-06 game, in a session that
+> ran once it was over. So the step-length and fix-gap questions are not waiting on someone reading
+> data that already exists: **the next captured game is the first one that can answer them.** Do
+> not go looking in `field-data/2026-09-06-stonedam-day-2/` for it; that snapshot predates all of
+> it and had `locationTrail` off.
 - **Mixed builds confound everything.** That game ran `buildVersion` 11, 15 and 16 simultaneously.
   Get everyone onto one build before drawing conclusions from the next capture.
 - **Role changes mid-game orphan player data — addressed, though not for this reason.** Will
