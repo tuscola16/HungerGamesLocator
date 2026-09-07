@@ -334,6 +334,14 @@ export interface GameConfig {
    * because the whole point is reading it after the game is over. That makes it a
    * retention liability: delete the subcollection once you've analysed the run.
    *
+   * **This flag now also spares `arrivals`, `checkpointTrips` and `entryTrips` from that
+   * cleanup** (#100). Excluding the trail alone fixed nothing: a trail is uninterpretable
+   * without the arrivals and trip latches to read it against, which is how Stonedam Day 2
+   * lost every collection its post-mortem rested on within minutes of the game ending. One
+   * flag, one intent — *this game is being recorded* — and no new privacy exposure, since
+   * the trail already holds every fix of which the arrival positions are a strict subset.
+   * The standing instruction covers all four: delete them once the run has been read.
+   *
    * **Default on since 2026-09-06.** It was opt-in and therefore off for Stonedam Day 2,
    * which is why that post-mortem could measure *where* arrivals landed but never *how
    * long a player went without a usable fix* — the single most important number for

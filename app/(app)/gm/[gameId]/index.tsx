@@ -21,6 +21,8 @@ import { db } from '@/services/firebase';
 import { Collections } from '@/services/firebase';
 import { endGame, startCleanup, reopenPlay, openLobby, reopenSetup, startGame, startEndgame, ENDGAME_RALLY_ID, updateGameConfig, deleteGame, setGameArchived, setGameMedia, resetPracticeGame, addCheckpoint, addRunbookEntry, sendBroadcast, sendGmMessage, subscribeGmMessages, gameConfig, parseEventDate, formatEventDate } from '@/services/gameService';
 import { PostGameMedia } from '@/components/PostGameMedia';
+import { isJoinCode, joinDeepLink } from '@/common/joinCode';
+import { QrCode } from '@/components/QrCode';
 import { friendlyError } from '@/services/errorUtils';
 import { validateGameConfig } from '@/common/gameConfigValidation';
 import { startGamePreflight } from '@/common/startPreflight';
@@ -900,6 +902,20 @@ export default function GMGameScreen() {
                 </TouchableOpacity>
               </View>
               <Text style={styles.codeDesc}>Players join — they cannot see others or checkpoints</Text>
+              {/* #92: the QR on the GM's *phone*, which is the half that was left
+                  outstanding — the web dashboard has had one since 2026-09-06, but a GM
+                  standing in a car park with twelve people has a phone, not a laptop.
+                  Rendered from `common/qr.ts` as plain Views, so no native module is added
+                  to the iOS pod configuration. Screen only: a printed code is a secret
+                  left lying around photographable. */}
+              {isJoinCode(game?.playerCode) && (
+                <View style={styles.qrWrap}>
+                  <QrCode value={joinDeepLink(game!.playerCode)} size={196} />
+                  <Text style={styles.codeDesc}>
+                    Point a phone camera at this — it opens the app with the code filled in.
+                  </Text>
+                </View>
+              )}
             </View>
 
             <View style={[styles.codeBlock, styles.gmCodeBlock]}>
@@ -1314,6 +1330,15 @@ function LobbyView({
           <Text style={styles.codeValue}>{playerCode}</Text>
           <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={22} color={copied ? Colors.success : Colors.textSecondary} />
         </TouchableOpacity>
+        {/* #92: the lobby is where the code actually gets used — a GM standing in a car
+            park holding their phone out to twelve arriving players. The web dashboard has
+            had this since 2026-09-06; a laptop is not what's in that GM's hand. */}
+        {isJoinCode(playerCode) && (
+          <View style={styles.qrWrap}>
+            <QrCode value={joinDeepLink(playerCode)} size={180} />
+            <Text style={styles.codeDesc}>Or scan this with a phone camera.</Text>
+          </View>
+        )}
       </View>
 
       <View style={styles.lobbyHeadingRow}>
@@ -1628,6 +1653,8 @@ const styles = StyleSheet.create({
     padding: 24, paddingBottom: 40,
   },
   modalTitle: { fontSize: 22, fontWeight: '800', color: Colors.text, marginBottom: 4 },
+  // #92: the join QR on the GM phone.
+  qrWrap: { alignItems: 'center', gap: 8, marginTop: 12 },
   modalSub: { fontSize: 14, color: Colors.textSecondary, marginBottom: 24 },
   codeBlock: {
     backgroundColor: Colors.surfaceElevated, borderRadius: 12, padding: 16, marginBottom: 12,

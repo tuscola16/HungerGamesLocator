@@ -31,6 +31,7 @@ import {
 import { validateGameConfig, requireMinInt } from '@shared/common/gameConfigValidation';
 import { startGamePreflight } from '@shared/common/startPreflight';
 import { isInertEntry } from '@shared/common/runbook';
+import { isJoinCode, joinDeepLink } from '@shared/common/joinCode';
 import { pointInBoundary } from '@shared/common/geo';
 import { deleteField } from 'firebase/firestore';
 import type {
@@ -1876,8 +1877,8 @@ function JoinQr({ code }: { code: string }) {
 
   useEffect(() => {
     const el = canvasRef.current;
-    if (!el || !/^[A-Z0-9]{6}$/i.test(code)) return;
-    QRCode.toCanvas(el, `outdoorgm://join?code=${encodeURIComponent(code)}`, {
+    if (!el || !isJoinCode(code)) return;
+    QRCode.toCanvas(el, joinDeepLink(code), {
       width: 168,
       margin: 1,
       // Fixed light-on-dark rather than themed: a scanner wants contrast, not our palette.
@@ -1889,7 +1890,7 @@ function JoinQr({ code }: { code: string }) {
   // `game?.playerCode ?? '…'`, so before the game doc resolves this would otherwise encode
   // the literal ellipsis — invisible to a scanner, which has no way to tell a placeholder
   // from a real code the way a human reading "…" does.
-  if (failed || !/^[A-Z0-9]{6}$/i.test(code)) return null;
+  if (failed || !isJoinCode(code)) return null;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, marginTop: 12 }}>
       <canvas ref={canvasRef} style={{ borderRadius: 8, background: '#fff', padding: 6 }} />

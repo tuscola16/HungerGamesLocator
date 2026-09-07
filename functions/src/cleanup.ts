@@ -101,6 +101,32 @@ export const cleanupRationPhotosOnGameEnd = functions.firestore
       functions.logger.error(`[cleanupOnGameEnd] winner notify failed for ${gameId} — cleanup continues`, e);
     }
 
+    /**
+     * ROADMAP #100: **keep the evidence when the game was being captured.**
+     *
+     * Stonedam Day 2 ended at 18:25:31Z and every collection its post-mortem rested on was
+     * gone minutes later; the only surviving copy was a snapshot someone happened to pull
+     * half an hour before the end, which is why that analysis is a lower bound rather than
+     * the whole game. `locationTrail` was already excluded from this purge — but a trail is
+     * uninterpretable without the arrivals and trip latches to read it against, so excluding
+     * it alone fixed nothing.
+     *
+     * The trigger is `config.locationTrail`, not a second flag, because it is the same
+     * intent: *this game is being recorded*. And it costs nothing in privacy — the trail
+     * holds **every** fix, of which the arrival positions are a strict subset, so a game
+     * that kept the trail has already accepted everything keeping the arrivals would expose.
+     *
+     * The standing instruction is unchanged and now covers all four subcollections: delete
+     * them once the run has been analysed.
+     */
+    const capturing = (after?.config as { locationTrail?: boolean } | undefined)?.locationTrail === true;
+    if (capturing) {
+      functions.logger.info(
+        `[cleanupOnGameEnd] game ${gameId} kept arrivals/checkpointTrips/entryTrips for analysis ` +
+        '(config.locationTrail is on) — delete them once the run is read'
+      );
+    }
+
     // All best-effort and independent — run in parallel. `force` on deleteFiles keeps
     // going past any individual error; absent photos/subcollections are fine.
     await Promise.allSettled([
@@ -113,11 +139,17 @@ export const cleanupRationPhotosOnGameEnd = functions.firestore
       // after the game ends, and no other path deletes it, so without this every finished
       // game leaves its overlay in Storage permanently.
       admin.storage().bucket().deleteFiles({ prefix: `games/${gameId}/overlay/`, force: true }),
+      // `locations` goes ALWAYS. It is the live-position liability #30 exists for, and it
+      // is the one thing `locationTrail` does not make redundant only because the trail
+      // supersedes it entirely — an analysed game reads the trail, never this.
       db.recursiveDelete(gameRef.collection('locations')),
-      db.recursiveDelete(gameRef.collection('arrivals')),
-      // Per-player crossing/entry latches (#50/#55/#67) — transient, tied to play.
-      db.recursiveDelete(gameRef.collection('checkpointTrips')),
-      db.recursiveDelete(gameRef.collection('entryTrips')),
+      // #100: these three survive a captured game — see the note above.
+      ...(capturing ? [] : [
+        db.recursiveDelete(gameRef.collection('arrivals')),
+        // Per-player crossing/entry latches (#50/#55/#67) — transient, tied to play.
+        db.recursiveDelete(gameRef.collection('checkpointTrips')),
+        db.recursiveDelete(gameRef.collection('entryTrips')),
+      ]),
       // Per-window ration-open push latches (#72) — transient, tied to play.
       db.recursiveDelete(gameRef.collection('rationWindowPings')),
       // Per-interval auto-starvation sweep latches (#11) — transient, tied to play.
