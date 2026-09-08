@@ -39,9 +39,11 @@ detail in git + the README) rather than being renumbered.
 
 The build-out **through Tier 7 plus all field-test findings has shipped** (see the callout).
 The remaining open work is: the field measurements under **#82** and **#100**, first-run
-verification of the Tier 12 batch, and the deferred public-launch gating (#46/#47). Tier 11
-is closed — **#57** per-GM teams is dropped; **#86** (server-authoritative game logic) is a
-research spike that was deliberately not taken up in this batch.
+verification of the Tier 12 batch, the two Day 1 findings (**#101**, **#102**), the **Tier 13**
+planning & authoring batch (**#103**–**#116**, none of it started), and the deferred
+public-launch gating (#46/#47). Tier 11 is closed — **#57** per-GM teams is dropped;
+**#86** (server-authoritative game logic) is a research spike that was deliberately not
+taken up in this batch.
 
 > **Built & removed** (retired numbers, never reused — one-line summaries; full detail in git
 > history + the [README](README.md#features)):
@@ -462,6 +464,63 @@ game; `locationTrail` was **off**, so gap lengths are still unmeasured.
   positions are a strict subset. `locations` is still purged unconditionally; the trail
   supersedes it. **The retention duty transfers with it: delete all four once the run has
   been read.**
+
+**101. Global announcements fire on a crossing, not on the clock.** Found 2026-09-08 in the
+Stonedam **Day 1** record (`games/6kX2agUKJeLkQeu78Zoh`, 2026-09-05 13:12:29Z → 14:39:54Z) — a
+different game from #100's Day 2, and one whose `broadcasts` are still intact.
+
+The five voucher stations and both gear drops were authored as `timed` runbook entries with
+`effect.audience: 'all-players'`. A runbook entry fires on a **crossing**; the window only gates
+whether that crossing counts. So every player who walked into the site while the window was open
+re-broadcast the same announcement to the entire field — and nobody walking in meant no
+announcement at all:
+
+- *"The Voucher Station at The Cliff Wall…"* — 14:29:03, 14:31:14, 14:34:03. Three identical pushes.
+- *"The First Gear Drop can be found at The Cairn"* — `startAt` minute 60 (= 14:12:29), actually sent
+  **14:32:21, 14:32:27, 14:34:43**. Twenty minutes late, then three times, two of them six seconds
+  apart (two players arriving together).
+- *"The Voucher Station at The Isolated Beach…"* — 13:54:39 and 13:59:12.
+
+Eight pushes where three were meant. The cost is in the record too: at **14:16:16** the GM
+hand-typed a `gm-message` — *"Drop one at rhe cairn is still unclaimed"* — because the announcement
+naming that drop had not fired and would not for another sixteen minutes.
+`config.tripIntervalMinutes: 2` is what let the repeats through, but the cooldown is not the bug.
+
+**Two fixes, and the second is the real one.**
+
+1. **An `all-players` effect needs a fire-once latch**, independent of the per-player trip
+   cooldown. `entryTrips` is keyed per player per entry — correct for a hazard aimed at the
+   crosser, wrong for a broadcast aimed at everyone. One game-scoped latch per entry.
+2. **The right tool already existed and was one click further away.** `scheduledEvents` fires on
+   the clock, exactly once — `auto_playercount_*` did precisely that in this same game — and **#44
+   already ships a voucher-site preset that scaffolds open/close/announce rows.** Day 1's
+   `scheduledEvents` holds nothing but the six auto player-count rows: the preset went unused
+   because authoring an announcement onto a checkpoint in the Runbook editor looks right and is
+   closer to hand. Time-based announcements belong in the run sheet, and the Runbook editor should
+   say so when a `timed` + `all-players` entry is being written.
+
+Until (1) lands, **#103's importer must refuse `timed` + `all-players`** rather than reproduce this
+five times straight from a spreadsheet.
+
+**102. Dead players get promoted to GM, and that hands them the whole console.** Extends #100's
+"role changes mid-game orphan player data" bullet, which recorded the *symptom* on Day 2 (Will and
+Joe holding `role: 'gm'` alongside player arrivals) and fixed the data-durability half with #91's
+`everPlayer` / `playerRun`. Day 1 shows it is not incidental: **nine of the twelve tributes** carry
+`role: 'gm'`, and every one of those member docs was written minutes *after* that player died —
+Kurt out 14:06:25 / doc 14:21:53, James out 14:08:45 / doc 14:12:03, Big DAWG out 14:00:23 / doc
+14:11:57, and six more on the same pattern.
+
+So it is a deliberate, repeated workaround: promote the dead so they can watch the map. **#99 is
+the feature they were reaching for**, and it is written but undeployed — this is the field evidence
+that it belongs *in* the first deploy rather than behind it. Two residuals #99 does not close:
+
+- **Promotion grants far more than sight.** Elimination, `fireRunbookEntry`, undelayed live
+  positions, and the entire runbook — the secrets a spectator must never see. A GM who wants to be
+  generous has exactly one control and it is much too coarse.
+- **The roster silently changes meaning.** A promoted player reads as a GM, so the "who is actually
+  playing" glance a GM takes during play stops being true. #88's roster needs a distinct
+  **spectator** state, and the #85 action menu should offer "let them spectate" so role promotion
+  stops being the nearest available thing.
 
 ---
 
@@ -968,6 +1027,258 @@ players the read cost of this is negligible; it was never the constraint.
   they already saw**. A revived spectator knows every checkpoint on the map. That is a GM
   operational fact, not a bug to fix.
 
+## Tier 13 — 2026-09-08 planning & authoring
+
+Fourteen items from two sources read together: the **event planning workbook** ("Hunger Games
+Materials 2026", 14 tabs) and the **Stonedam Day 1 game record** in Firestore. The workbook is the
+spec for what the app does not do — every column of numbers in it is a data model that lives in a
+spreadsheet, and every rule written to compensate for the app is a feature request. The game record
+says which of those actually cost something on the day.
+
+**The through-line: the app runs the game well and plans it badly.** Tier 12 aimed at the live
+surface and hit it. What is still on paper is everything that happens *before* Start and *after*
+Close — authoring 33 runbook entries by hand the night before, reconciling numbered cards against a
+sheet during play, and having no record afterwards of how far the plan actually got.
+
+Three facts from the record shape the tier:
+
+- **`game.rules` is the empty string.** All 38 rules — seven sections, briefed twice, closed with
+  *"PLEASE RE-READ THE ENTIRE RULE SET"* — stayed in the workbook. The app has a rules field and it
+  went unused.
+- **The ration card numbers in Firestore match the workbook exactly** (Aaron 33, Payne 35, Tappan
+  24, Kurt 23, Chris 27, Joe 31 then his second card 32, James 26 then 25). Twenty submissions,
+  every one marked `valid` — a GM approving photos by eye against a spreadsheet. The mapping is
+  deterministic, which is what makes #105 an import rather than a new authoring burden.
+- **The game ran 87 minutes of a planned 210.** No deaths for 46 minutes, then eleven in 41.
+  Voucher sites 3–5, the second gear drop and the entire end-game never happened. The workbook's
+  pacing model (1–2 deaths per 30-minute window, evenly spread) was wrong in a specific, learnable
+  way — and the app holds the only measurement of it.
+
+**Build order — the importer first, because most of the rest is authored through it:**
+
+1. **#103** CSV export → import. Export is the cheaper half and validates the encoding; import is
+   web-only (`runbook` is already GM-writable in the rules), so no functions, no rules, no build.
+2. **#107** presets + bulk authoring and **#116** bulk districts — the same authoring problem at a
+   smaller scale, and #107 reuses #103's validation.
+3. **#105 → #106** the card registry, then redemption. #105 gates #106.
+4. **#104** player obligations — the largest item, and the only genuinely new game mechanic.
+5. **#111** rulebook, **#114** stealth notifications, **#113** toll cadence — cheap and independent.
+6. **#112** after-action report and **#115** kill attribution — both want a captured game first.
+7. **#108** sponsor distribution, **#109** crew role, **#110** placement verification — the
+   remaining paper.
+
+**103. Import a runbook (and checkpoints) from CSV.** The night before Day 1, 33 runbook entries
+were hand-authored between 19:46 and 20:13, and one more (`trap 5`, carrying an eight-player target
+list) at **14:02 during live play**. Twelve of the 33 are near-identical "Found: *place*" entries.
+That is the workbook's Traps and Drop Plan tabs being retyped into a web form.
+
+**Feasible, cheap, and web-only.** `firestore.rules` has
+`match /runbook/{entryId} { allow read, write: if isGameGM(gameId) }`, so the GM's browser writes
+these docs directly — no callable, no rules change, no new build. The work is entirely serialization
+and validation. Full column contract, encoding and idempotency rules in
+[ROADMAP_DATA_MODEL.md](ROADMAP_DATA_MODEL.md#103-csv-export--import-for-checkpoints-and-runbook);
+the decisions that belong here:
+
+- **Export ships first.** Same field mapping in reverse, cheaper, and it hands back Day 1's 33
+  entries as next year's starting CSV — which is also how the encoding gets validated before
+  anything is trusted to write.
+- **One row per queue slot**, merged on a `key` column. `queueSlots` is a sparse
+  `(RunbookEffect | null)[]`, and the alternative is an inline mini-syntax in a single cell, which
+  means writing a parser for text full of punctuation. The row-per-slot shape also lands directly
+  on the workbook's Traps tab, whose "Give to person number" column *is* the slot ordinal.
+- **The CSV is 1-based**, `queueSlots` is 0-based; subtract on import. The sheet is already written
+  the way a GM thinks and the import should not make them renumber.
+- **Deterministic doc ids from `key`.** `addRunbookEntry` uses `addDoc`, so a second import — and
+  there will be one, because the sheet gets edited — duplicates all 33 entries and leaves the
+  geofence choosing by priority among twins. This is the part that must not be got wrong.
+- **Strict name resolution, with a dry-run diff before any write.** Fail the whole import on a
+  missing or ambiguous checkpoint name. Day 1's 35 names are unique, but `red 4` / `red 8` /
+  `yellow 5` / `blue 3` are close enough that the realistic failure is a typo silently attaching a
+  trap to the wrong site.
+- **Never import `trapKitCode`.** It is documented as a secret on paper, generated from the
+  no-`0/O/1/I/L` alphabet and never enumerable by a client. A GM typing codes into a shared sheet
+  will pick weak ones and the sheet becomes the leak. Import the entries, let the app generate the
+  codes, then *export* them for printing.
+- **Refuse `timed` + `audience: 'all-players'` until #101 lands**, or the importer reproduces that
+  defect five times from one paste.
+- **Player targeting rides on #96.** `playerIds` are uids that do not exist during `setup`; the CSV
+  carries `targeted: true` and the entry stays inert until people are assigned. The CSV expresses
+  intent, never identity.
+
+Checkpoints get the same treatment in the other direction: their coordinates come from the map, not
+a sheet, so the loop is **place pins on the web map → export checkpoints CSV → fill in behaviour
+columns in Sheets → import runbook CSV → dry-run diff → `startGamePreflight`**. The checkpoint
+export is what makes the workbook's location column trustworthy rather than hand-copied.
+
+**104. Player obligations — orders with a deadline the app actually tracks.** Four hazards in Day 1
+issued a real-world deadline the app has no concept of:
+
+> *"Go to the bathrooms within 10 minutes or die."*
+> *"Go get them at the docks from your sponsor within 10 minutes or you are dead."*
+> *"Make your way to the top of stonedam within the next 10 minutes or be eliminated."* (the mass version)
+> *"You will have to eat two rations during this time interval or die from dehydration."*
+
+Today a GM has to remember that a named player was told at 13:49 to reach a named place by 13:59,
+and then check. The server already runs every crossing against every checkpoint and already knows
+each player's position; this is mostly wiring, not new machinery.
+
+**Two kinds, one model.** An obligation is a row on a player with a deadline and a satisfaction
+condition: *reach checkpoint Y* (satisfied by a crossing) and *submit N rations this window*
+(satisfied by the ration loop, and a direct modifier on the #11 starvation sweep). Both are created
+by a runbook effect firing, both surface as a live countdown on the player's screen and a column on
+the GM roster, and both resolve to satisfied or expired. **Expiry does not auto-eliminate** — it
+raises the case to the GM, the way `starvationMode: 'gm-confirmed'` already does, which is the
+setting Day 1 actually ran. Schema in
+[ROADMAP_DATA_MODEL.md](ROADMAP_DATA_MODEL.md#104-player-obligations).
+
+Every one of those four hazards also ends *"can be cancelled by a medkit"* — the app is currently
+advertising a mechanic it does not implement. #106 is the other half of this item.
+
+**105. The numbered-item registry.** Four tabs of the workbook carry the same four columns —
+`ration number`, `voucher number`, `medkit number`, `trapkit number` — across starting gear, midgame
+gear, prepositioned drops and stores; and Drop Plan rows 33–46 then do supply arithmetic by hand
+(*"maximum theoretically needed 72 / estimated need 44 / total available 53"*).
+
+The app has exactly one card field — an optional number on a ration submission — and
+`enforceUniqueRationCards` catches a *repeat*. Nothing checks that a number is real, that it was
+ever put in the field, or that it belongs to the player holding it. The registry is a collection of
+numbered items with a kind, an optional assigned holder, an optional placement, and a consumed
+stamp.
+
+**The primitive already exists**: `RunbookEntry.trapKitCode` is a numbered physical card redeemed by
+code, single-use, never enumerable by a client. #105 generalizes it to the other three kinds, and
+the live supply forecast the Drop Plan tab was estimating falls out of it for free.
+
+**106. The redemption loop — medkits, vouchers, and the end of the WhatsApp channel.** Rules 37–38
+and the morning-of sheet route two mechanics entirely outside the app: *"send Shannon a photo of the
+trap card via whatsapp or text, wait for confirmation…"* and *"send a photo of the medkit and rip up
+the medkit, or we will trigger the trap consequences."*
+
+**#97 already closed the arming half** — `armPlayerTrap` takes the code, resolves the site from the
+player's own last fix, and honours an exclusion list, which is exactly what rule 37 asks for. What
+is left is *consumption*: photograph a numbered card, have a GM approve it, and have that approval
+do something. It is the ration pipeline — live camera capture, Storage upload, GM valid/reject —
+generalized from one item kind to four, and the thing it does is cancel an obligation from #104.
+
+This removes the last out-of-app channel, and with it a single human who was simultaneously running
+medical, traps and medkits.
+
+**107. Entry presets and bulk authoring.** Twelve of Day 1's 33 entries are the same entry twelve
+times: `fixed-order`, `defaultNone: true`, `revealOnFire: 'triggerer'`, priority 2, one flavour line
+each. The hand-authoring shows in the result — some fall back to `effect.kind: 'gm-notify'`, some to
+`'notify'`, and one to `'notify'` with **no message at all**, which is a silent no-op nobody
+intended.
+
+A **cache-site preset** applied across a multi-select of checkpoints collapses the hour and removes
+the inconsistency at the same time. Reuses #103's validation, and the `trap 5` entry authored at
+14:02 *during play* is the case a preset most obviously serves.
+
+**108. Sponsor gear distribution, in bulk.** The workbook's starting and midgame tabs are 12 players
+× specific gear, and rule 34 requires drops *"clearly marked with the name of the person intended to
+receive it."* The app can already do the delivery — `revealOnFire: 'targeted'` plus a targeted push
+is exactly the shape — but a GM would hand-author roughly 24 entries the night before. So instead
+Day 1 shipped four entries reading *"An anonymous sponsor has gifted you a weapon. **Message the GM
+to arrange delivery.**"* and a human handoff.
+
+Tellingly, the workbook's own "Sponsor Distributor" and "Where" columns are **blank**: that step did
+not happen on the day. Paste the per-player gear table, generate the targeted entries and the
+pushes. This falls out of #103 plus #107 more than it is its own build.
+
+**109. A crew role, and check-off on the run sheet.** The workbook has a whole tab — "Gus-only
+Cadence" — that is nothing but the run sheet filtered to one person, and the main cadence tab splits
+rows between two names in a "Responsible Party" column.
+
+The crew *were* in the app on Day 1 — as GMs. That is the gap: "helper" and "game master" are one
+role, so running a voucher site requires the full console (see #102 for the other cost of that).
+
+**This is not the role #99 superseded.** #99 dropped *“helper but not quite GM”* for the
+**dead-player** case — someone eliminated mid-game who can now be sent to deploy a drop — and that
+case stays closed: a dead player keeps `role: 'player'` and gains a read-only arena view. #109 is
+the **never-playing** crew, who exist from `setup` onward, were on the island before anyone joined,
+and need the run sheet rather than the map. The two do not overlap and the spectator view does not
+serve this one.
+
+Two parts: a **limited crew role** with the run sheet and neither map nor runbook, and **check-off
+on run-sheet rows** so a GM can see "Voucher Site 3 live ✅ 11:29 by Aaron". Today the run sheet
+fires automatically and nobody confirms the physical action happened.
+
+**110. Placement verification for the pre-set.** Two P0 rows in the workbook's to-do tab were still
+unchecked at game time: **"prep drops"** and **"Re-check all sponsorship drops."** The Drop Plan tab
+names 15 physical sites with contents manifests, pre-set by three people the day before.
+
+A placement mode — walk to each checkpoint, tap "placed", record the **actual** GPS at placement
+along with the contents — replaces that checklist and quietly serves #100: a surveyed coordinate
+beats one guessed on a map, and some geofence error starts there rather than in the fix.
+
+**111. A structured rulebook, and an acknowledgement.** 38 numbered rules across seven sections
+(GENERAL / FOOD / COMBAT / COMMUNICATION / SAFETY / SPONSORSHIP / ARENA), delivered at an evening
+briefing, repeated in a morning-of tab, and closed with *"PLEASE RE-READ THE ENTIRE RULE SET before
+we play tomorrow."* **`game.rules` in the Day 1 record is `""`.** The app stores free text and shows
+it once in the tutorial; nothing is reachable mid-game.
+
+Sectioned, numbered and searchable during play, plus a **read-and-acknowledged flag visible in the
+#88 roster**, turns a recurring briefing problem into a screen. `cloneGame` (#65) already carries a
+game forward, which is what makes "update the rules with lessons learned" — an actual row in the
+workbook's to-do tab — a diff rather than a retype.
+
+Worth recording while writing them: several rules exist *only* because the app cannot enforce
+something (rule 29's "keep all other apps closed" is #77/#82; rule 21's duplicate death report is
+#115). Those are the backlog in disguise.
+
+**112. The after-action report.** Day 1 planned 210 minutes and ran 87. No deaths for the first 46
+minutes, then eleven in 41. Four of six ration windows never happened; voucher sites 3, 4 and 5
+never opened; the second drop and the whole end-game never ran. Two of six auto player-count
+broadcasts fired.
+
+A report written at Close — deaths per window, arrivals per site, ration compliance, which runbook
+entries never fired, planned versus actual on every run-sheet row — is the calibration the Drop Plan
+tab was guessing at, and the difference between planning next year from data and planning it from
+memory.
+
+**Retention is already solved**: #100's 2026-09-06b fix spares `arrivals`, `checkpointTrips` and
+`entryTrips` whenever `config.locationTrail` is on. This item is the *rollup and the view*, not the
+retention — though a small summary doc written before the purge would survive a game that ran with
+the trail off, which is exactly what Day 1 was.
+
+**113. Make the death toll follow the deaths, not the clock.** `playerCountBroadcast` seeds six
+30-minute rows at Start. In Day 1 two fired (30 and 60 min) across an 87-minute game, and the one at
+30 minutes said *"12 tributes remain"* — true, and stale within the hour. At **14:15:28** the GM
+hand-typed *"4 tributes remain."* as a `gm-message`, 76 seconds after the automatic one had said 5.
+
+A fixed cadence does not fit a death curve that is flat and then vertical. Options are a
+death-triggered toll, a floor/ceiling on interval, or simply letting the existing per-death
+broadcast carry the count — which it already does (*"Aaron has fallen — 11 tributes remain."*),
+making the scheduled one largely redundant once deaths start. Cheap, and rule 26 promises players
+an update every 30 minutes, so the promise needs to match whatever is chosen.
+
+**114. Stealth notifications.** Rule 27, in full: *"DO NOT KEEP YOUR PHONE ON SILENT. You may miss
+out on important updates. Importantly, though, loud phone notifications may also give away your
+position to nearby tributes."*
+
+The app forces players to choose between missing information and being found, and the rules then
+try to arbitrate it. A vibrate-only critical channel plus a quiet channel for the "N remain" chatter
+resolves it in the app instead — an Android notification channel split and the iOS equivalent, with
+a per-player toggle. This is a stealth-game mechanic, not a settings screen.
+
+**115. Kill attribution and the death manifest.** Rule 21 says tap "I've been killed" in the app;
+the morning-of sheet *also* says message the GMs before you move. The duplication exists because the
+GM needs two things the button does not capture — **who** and **what was left there**: *"leave your
+bag where you died… that is how we know where your stuff is in case no one else picks it up."*
+
+A "who killed you?" picker on the #89 death screen feeds kill counts into #88's standings, and the
+death pin (built, GM map) already knows the location — adding the loot manifest to it serves rule
+21's stated purpose and gives cleanup crews a retrieval list. Wants #105 for the manifest to be
+anything better than free text.
+
+**116. Bulk and random district assignment.** **Not one member doc in Day 1 carries a `district`.**
+The workbook assigned all 12 with `RAND()`, the Traps tab's "DO NOT give trap if both tributes from
+the same district show up together" depends on it, and the #5 same-district suppression is fully
+built — so the rule never ran, in a game that was designed around it.
+
+The feature is not missing; it is unusable at 9pm the night before, because it is 12 individual
+edits through a per-player modal. Randomly assign N per district across the roster, or paste a
+name→district column. Small, and it unblocks a mechanic that already exists.
+
 ---
 
 ## Tier 11 — P3 polish *(closed)*
@@ -1031,9 +1342,15 @@ its bundle ID / SHA-1 and the Maps SDK in Cloud Console before wide release. Con
    single captured game for free: `locationTrail` defaults on, and as of 2026-09-06b it keeps
    the arrivals and trip latches you need to read it against. **Get everyone onto one build
    first** — Stonedam ran three simultaneously and that confounds everything.
-5. **#86** — the one Tier 12 item not built. Its own entry says to answer the OTA question
+5. **Tier 13 (#103–#116) is the next build, and none of it has started.** It comes out of the
+   event planning workbook read against the Day 1 game record, and its own entry carries the
+   build order — **#103 the CSV importer first**, because #107, #108 and #116 are all authored
+   through it and it is a web-only change (no functions, no rules, no build). **#101 is a
+   defect and should go with the Tier 12 deploy, not wait for Tier 13**; **#102 is an argument
+   for shipping #99 in that same deploy rather than behind it.**
+6. **#86** — the one Tier 12 item not built. Its own entry says to answer the OTA question
    before prototyping: `updates.enabled` was turned off deliberately after the 2026-06-19
    install-over crash loop, and re-enabling it may retire half the motivation outright.
-6. **Tier 11 is closed** — everything shipped and **#57 is dropped**.
-7. **Deferred** (46–47) waits for a real public-store launch; confirmed 2026-09-06 that no
+7. **Tier 11 is closed** — everything shipped and **#57 is dropped**.
+8. **Deferred** (46–47) waits for a real public-store launch; confirmed 2026-09-06 that no
    public launch is planned, so both stay parked.

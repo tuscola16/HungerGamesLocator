@@ -13,6 +13,12 @@
 > must go out together: winner detection now advances a game into `phase: 'cleanup'`, which
 > no binary already in the field recognizes.
 >
+> **Tier 13 (#101–#116, added 2026-09-08) is the exception — none of it is built.** Those
+> sections are specifications again, not records: new collections `obligations` (#104),
+> `items` (#105), `redemptions` (#106), `rules` (#111) and `summary` (#112),
+> plus new callables `submitRedemption` / `reviewRedemption` (#106) and a third join code for the
+> `crew` role (#109).
+>
 > New collections this batch added, for the `Collections` map and the rules: **`roster`**
 > (#88, player-readable projection, server-write-only). New callables: **`armPlayerTrap`**
 > (#97), **`undoDeleteGame`** (#90). New triggers: **`onMemberWriteProjectRoster`** /
@@ -695,6 +701,440 @@ pure and shared by both GM surfaces through the Start-Game preflight.
 
 ---
 
+## 101. Fire-once latch for all-players effects
+
+> **Not built.** Field-test finding from Stonedam Day 1 — a `timed` + `audience: 'all-players'`
+> entry re-broadcast on every crossing (three identical pushes for one announcement, twenty
+> minutes late). See [ROADMAP.md](ROADMAP.md) #101.
+
+**No new schema.** `entryTrips/{userId}_{entryId}` (#67) is keyed per player per entry — right for
+an effect aimed at the crosser, wrong for one aimed at everyone, since twelve players through one
+site means twelve latches and twelve broadcasts of the same text. But the entry-scoped read already
+exists: **#97's `trapAdmitsVictim` (`functions/src/geofence.ts:161`) queries
+`entryTrips.where('entryId', '==', e.id)`** and uses the result as a game-wide count and clock. The
+same query answers "has this entry already broadcast?".
+
+In `deliverEffect`, when the resolved effect has `audience === 'all-players'`:
+
+1. Query `entryTrips` by `entryId`, **excluding the trip doc for this crossing** — order matters,
+   because the per-player trip is written for every crossing regardless and would otherwise latch
+   against itself. Check before that write, or filter the current `{userId}_{entryId}` id out.
+2. Non-empty → skip the `Broadcast` and the push; still write the trip. The crossing happened and
+   the #73 GM feed should say so.
+3. Empty → deliver as today.
+
+The `entryId` index this needs is already in place for #97, and an ordinary single-target entry
+never runs the query, so the cost is confined to the case that needs it.
+
+**Not configurable.** A global announcement that is *meant* to repeat is a run-sheet row
+(`scheduledEvents`), which is where #101 argues this authoring should have gone to begin with.
+
+**Authoring guard (client, no schema):** `EntryEditor` warns when `trigger: 'timed'` and
+`audience: 'all-players'` are set together, pointing at the run sheet and the #44 voucher preset.
+---
+
+## 102. Spectator as a state, not a role
+
+> **Not built.** Extends #100's role-change bullet; see [ROADMAP.md](ROADMAP.md) #102. Most of the
+> capability is #99, which is written and undeployed.
+
+No new collection. Two deltas:
+
+- **`GameMember.spectator?: boolean`** — set when a GM grants early spectator access to a member
+  who is `out`, distinct from `role: 'gm'`. #99's delayed map already keys off `out` + `outAt`; this
+  is for the GM who wants to shortcut the delay, and it exists so that *granting sight* stops
+  being spelled "promote to GM". Pinned in `firestore.rules` exactly like `role` — a player must
+  never set their own.
+- **#88 `roster` projection gains the same flag**, so the roster can show a spectator row distinctly
+  from a GM row and the "who is actually playing" count stays honest.
+
+**Rules consequence:** the #99 spectator read predicate becomes
+`isSpectator(gameId) = member.out == true && (spectatorDelayElapsed || member.spectator == true)`.
+The runbook stays GM-only in every case — a spectator sees the live map, never the secrets.
+
+**Client:** the #85 per-player action menu gains "Let them spectate now", which is the control a GM
+was reaching for nine times on Day 1.
+
+---
+
+## 103. CSV export & import for checkpoints and runbook
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #103 carries the rationale and the ordering (export
+> first). This is the column contract.
+
+**No backend.** `firestore.rules:168` already grants the GM full read/write on `runbook`, and
+`:159` the same on `checkpoints`. This is `web/` only — a parser, a validator, a dry-run diff and a
+`writeBatch`. Nothing here needs a function, a rules change or a build.
+
+### Runbook CSV — one row per queue slot
+
+| column | maps to | notes |
+| --- | --- | --- |
+| `key` | *(not stored)* | merge key: rows sharing a `key` are one entry. Also the doc-id seed. |
+| `checkpoint` | `checkpointId` | resolved by **name**; see resolution below |
+| `entry` | `name` | GM-facing label |
+| `priority` | `priority` | integer, higher wins |
+| `trigger` | `trigger` | `fixed-order` \| `always-on` \| `timed` \| `gm-prompted` |
+| `slot` | `queueSlots[n-1]` | **1-based**; blank = the entry-level `effect` |
+| `kind` | `effect.kind` / `queueSlots[i].kind` | `hazard` \| `boon` \| `notify` \| `gm-notify` |
+| `message` | `.message` | |
+| `audience` | `.audience` | `notify` only |
+| `reveal` | `revealOnFire` | `none` \| `triggerer` \| `targeted` \| `all` |
+| `default_none` | `defaultNone` | `fixed-order` only |
+| `start_min` / `end_min` | `startAt` / `endAt` | see `TimedBound` below |
+| `targeted` | `targeted` | #96 — intent without uids |
+| `max_victims` | `maxVictims` | #97 co-arrival cap |
+
+Never importable: `trapKitCode` (generated, see below), `playerIds`, `excludePlayerIds`, `armedBy`,
+`armedByName`, `armedAt`, `firedAt`, `createdAt`, `id`.
+
+**Slot merge.** Rows with the same `key` collapse into one `RunbookEntry`. The blank-`slot` row
+supplies the entry-level fields (`priority`, `trigger`, `effect`, `reveal`, bounds); `slot=N` rows
+fill `queueSlots[N-1]`. Absent indices become `null`, which is how the sparse
+`[null,null,null,hazard,null,null,hazard]` shapes get expressed without a bespoke syntax — and it is
+the same shape as the workbook's Traps tab, whose "Give to person number" column is the ordinal.
+
+**`TimedBound` encoding.** One column each: blank → the field's default (`game-start` / `game-end`);
+an integer *N* → `{ kind: 'time', atMinute: N }`; the literals `game-start` / `game-end` → those
+variants. `fireAt` is never imported — a wall-clock timestamp does not survive a game being
+rescheduled, which is exactly what a CSV authored the night before is for.
+
+### Resolution and validation, in order
+
+1. **Parse** — reject on unknown columns, so a renamed header fails loudly rather than silently
+   dropping behaviour.
+2. **Resolve checkpoint names** — trim, casefold, match. **Any miss or ambiguity fails the whole
+   import.** Day 1's 35 names are unique but `red 4` / `red 8` / `yellow 5` / `blue 3` are one
+   keystroke apart, and a trap silently attached to the wrong site is the realistic failure.
+3. **Enums** — `trigger`, `kind`, `audience`, `reveal` against the union types in
+   [types/index.ts](types/index.ts).
+4. **Cross-field** — `audience: 'all-players'` only on `kind: 'notify'`; `slot` / `default_none`
+   only on `fixed-order`; `start_min` / `end_min` only on `timed`, and `start_min < end_min`;
+   `max_victims` only on an entry with a trap kit.
+5. **`timed` + `all-players` → refuse**, until #101's latch exists.
+6. **Priority collisions** — warn per checkpoint. Ties break by `createdAt`, and a batch import
+   stamps every row within milliseconds, so any tie resolves arbitrarily. Either warn, or stagger
+   `createdAt` by row index; do not leave it to chance.
+7. **Boundary** — reuse `pointInBoundary` (#63) on the checkpoint import path, same as the #68
+   placement guard.
+8. **Inert entries** — run `isInertEntry` (`common/runbook.ts`) and list them in the summary.
+   `startGamePreflight` (#23) stays the final gate and still only warns.
+9. **Dry-run diff** — create / update / unchanged / error per row, and no write until it is
+   accepted.
+
+### Idempotency
+
+Doc id is `imp_${slug(key)}` via `setDoc(..., { merge: false })`, not `addDoc`. Without this the
+second import — and the sheet *will* be edited — duplicates every entry, and the geofence starts
+resolving by priority among identical twins. Entries created in the web editor keep their random
+ids and are never touched by an import; an import only ever owns its own `imp_` namespace, so a
+re-import cannot clobber something authored by hand during play.
+
+`createdAt` is preserved on update (it is a tiebreaker), `armedAt` / `firedAt` are never written.
+
+### Trap kit codes
+
+Import creates entries; the **app** generates `trapKitCode` from the game-code alphabet (no
+`0/O/1/I/L`). The export then carries the generated codes so the cards can be printed. Importing
+GM-chosen codes would put an unguessable secret into a shared spreadsheet and let a GM pick a weak
+one — the whole quota mechanism is that a code cannot be guessed.
+
+### Checkpoints CSV
+
+`name, latitude, longitude, radius, icon, visibility, order`. Export is the load-bearing direction:
+coordinates come from placing pins on the web map, and the export is what makes the workbook's
+location column trustworthy rather than hand-copied. On import, `name` is the merge key and the same
+boundary check applies. Pairs with **#110**, which replaces the exported coordinate with a surveyed
+one.
+
+---
+
+## 104. Player obligations
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #104. The only genuinely new game mechanic in Tier 13.
+
+A runbook effect can already say *"reach the top of stonedam within 10 minutes or be eliminated"*.
+Nothing tracks it. New collection:
+
+```
+games/{gameId}/obligations/{obligationId}
+  playerId, playerName            // denormalized; GMs read members, the player reads their own
+  kind: 'reach' | 'rations'
+  sourceEntryId                   // the runbook entry that imposed it
+  message                         // the text the player was shown, for the GM's context
+  createdAt, dueAt                // dueAt = createdAt + the entry's window
+  // kind: 'reach'
+  checkpointId?, checkpointName?
+  // kind: 'rations'
+  intervalIndex?, requiredCount?  // e.g. 2 for the noxious-swamp hazard
+  status: 'open' | 'satisfied' | 'expired' | 'cancelled'
+  satisfiedAt?, cancelledBy?, cancelledByName?, cancelledAt?
+```
+
+Rules: the owning player reads their own rows (they need the countdown); GMs read all; **writes are
+server-only** — a player who could write these could satisfy their own obligation.
+
+`RunbookEffect` gains the authoring side:
+
+```ts
+export interface RunbookEffect {
+  // ...existing kind / message / audience...
+  /** ROADMAP #104: firing this effect also opens an obligation on the player it hits. */
+  obligation?: {
+    kind: 'reach' | 'rations';
+    withinMinutes: number;
+    checkpointId?: string;   // kind: 'reach'
+    requiredCount?: number;  // kind: 'rations' — replaces the 1-per-window default
+  };
+}
+```
+
+**Satisfaction.**
+- `reach` — the existing geofence crossing path closes it; no new evaluation, just a lookup on
+  confirmed arrival.
+- `rations` — `submitRation` closes it once the window's count is met, and the **#11
+  `starvationSweep` reads `requiredCount` instead of assuming 1** for that player and interval.
+  This is the one place an obligation changes an existing server rule rather than adding one.
+
+**Expiry.** A per-minute sweep (the `scheduledEvents` sweeper already runs at that cadence — extend
+it rather than adding a second scheduler) flips `open` → `expired` past `dueAt` and notifies the
+GM. **It never eliminates.** Day 1 ran `starvationMode: 'gm-confirmed'`; an obligation that kills
+automatically would be a stricter rule than the one the game's own ration loop uses.
+
+**Cancellation** is #106: an approved medkit redemption sets `status: 'cancelled'`, which is what
+every one of those four hazard texts already promises the player.
+
+**Client.** Player: a countdown card in the play screen, and the obligation text repeated there so
+it survives a dismissed push. GM: an "Obligations" column on the #88 roster and a filter for open
+ones — during play, "who is on a clock right now" is the question, and it currently has no answer
+outside the GM's memory.
+
+---
+
+## 105. The numbered-item registry
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #105.
+
+```
+games/{gameId}/items/{itemId}          // itemId = `${kind}_${number}`, deterministic
+  kind: 'ration' | 'voucher' | 'medkit' | 'trapkit'
+  number                               // as printed on the card, string (leading zeros: "06")
+  assignedTo?, assignedToName?         // starting/midgame sponsor gear
+  placedAt?: { checkpointId?, note? }  // prepositioned drops and stores
+  consumedAt?, consumedBy?, consumedByName?, redemptionId?
+  createdAt
+```
+
+GM read/write; **players never read this collection** — it is the map of every card in the game.
+Redemption goes through #106's callable, which reads it with the admin SDK.
+
+**Import** is a CSV in the #103 style (`kind, number, assigned_to, placed_at, note`), because the
+workbook already holds exactly this table across four tabs, and the Day 1 record proves the mapping
+is faithful: cards 33 / 35 / 24 / 23 / 27 / 31 / 32 / 26 / 25 appear in `rations` precisely as the
+starting-gear tab assigns them.
+
+**What it buys immediately**, beyond `enforceUniqueRationCards`'s repeat check: a submitted number
+that was never printed, or that belongs to another player, becomes a flag on the GM's review row
+instead of something caught by eye against a spreadsheet. And the supply forecast the Drop Plan tab
+computed by hand — cards in circulation versus players alive per window — is a query.
+
+**Deliberately not modelled:** possession. Cards change hands when players die and bags are looted,
+and tracking that would need players to report every pickup. `assignedTo` is the *initial*
+distribution and nothing more.
+
+---
+
+## 106. Redemption — the generalized ration pipeline
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #106. Gated on #105.
+
+```
+games/{gameId}/redemptions/{redemptionId}   // `${playerId}_${kind}_${number}` — idempotent re-submit
+  playerId, playerName, kind, number
+  photoPath                                  // Storage, same member-scoped shape as rations
+  targetObligationId?                        // medkit cancelling a #104 obligation
+  status: 'pending' | 'valid' | 'rejected'
+  submittedAt, reviewedAt?, reviewedBy?, rejectReason?
+```
+
+Writes go through a **`submitRedemption` callable**, mirroring `submitRation` (#74) — client-side
+create stays closed (`allow create: if false`) so the item lookup and the single-use check happen
+server-side. Approval (`reviewRedemption`, GM-only) stamps `items/{itemId}.consumedAt` and, for a
+medkit with a `targetObligationId`, sets that obligation to `cancelled`.
+
+**Storage:** `games/{gameId}/redemptions/{playerId}/{kind}_{number}.jpg`, same `storage.rules`
+shape as rations (player writes own path while an active member; owner + GMs read), and the same
+`cleanupRationPhotosOnGameEnd` sweep should take these too.
+
+**Client** reuses `components/CameraCapture.tsx` and the ration panel's permission→launch flow
+wholesale; the GM side reuses the rations review feed with a kind filter. This is why the item is
+cheaper than it looks: the loop exists, it is currently welded to one item kind.
+
+**Trapkit is the exception** — it redeems through #97's existing `armPlayerTrap` (a code, not a
+photo, because the player also has to choose a site). #105 should still hold the trapkit rows so the
+GM has one inventory, and `armPlayerTrap` should stamp `consumedAt` on the matching item.
+
+---
+
+## 109. Crew role
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #109. **Distinct from the “helper but not quite GM”
+> role #99 superseded** — that was the *dead-player* case and stays closed. This is never-playing
+> crew, present from `setup`, who need the run sheet and not the map.
+
+`UserRole` gains `'crew'`: `'player' | 'gm' | 'crew'`. A crew member reads the game doc, the run
+sheet and their own member row; **not** `runbook`, `checkpoints`, `locations`, `members` or
+`roster`. They are not a player (no tracking, no rations, not counted alive, invisible to winner
+detection) and not a GM (no elimination, no `fireRunbookEntry`, no map).
+
+`joinGameByCode` gains a third code, `crewCode`, generated alongside the other two in `createGame`.
+Every `role === 'gm'` predicate in `firestore.rules` and in `functions/` must be audited rather than
+pattern-matched — several read as "not a player" today and would silently admit crew.
+
+**Run-sheet check-off** (`ScheduledEvent`): `assigneeId?`, `assigneeName?`, `doneAt?`, `doneBy?`,
+`doneByName?`. Crew may write only the `done*` fields, and only on rows assigned to them. This is
+what turns the workbook's "Gus-only Cadence" tab into a filter rather than a second document.
+
+---
+
+## 110. Placement verification
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #110. Feeds #100.
+
+`Checkpoint` gains:
+
+```ts
+  /** ROADMAP #110: the coordinate a human actually stood on, versus the one placed on a map. */
+  placedAt?: FsTimestamp;
+  placedBy?: string;
+  placedByName?: string;
+  placedAccuracy?: number;
+  /** What is physically at the site — the Drop Plan tab's contents column. */
+  manifest?: string;
+```
+
+Confirming a placement **overwrites `latitude`/`longitude`** with the surveyed fix (gated on
+`placedAccuracy` passing `minFixAccuracyMeters`, and on the #68 boundary guard) and records the
+prior value in the GM audit log. That overwrite is the point: a map-guessed coordinate and a
+surveyed one differ by more than the geofence radius often enough to matter, and #100 is currently
+attributing all of that error to the fix.
+
+The GM/crew view is the checkpoint list filtered to unplaced sites — which is the workbook's
+"prep drops" and "Re-check all sponsorship drops" rows, both still unchecked at game time.
+
+---
+
+## 111. Structured rules
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #111. `game.rules` was `""` for the whole of Day 1.
+
+Keep `Game.rules` (free text) as the legacy field and add a subcollection, so old games render
+unchanged:
+
+```
+games/{gameId}/rules/{ruleId}
+  number,            // "6.0" — the workbook's own numbering, preserved; players cite it aloud
+  section,           // GENERAL | FOOD | COMBAT | COMMUNICATION | SAFETY | SPONSORSHIP | ARENA
+  text, order
+```
+
+All members read; GM writes. Sections are free-form strings, not an enum — the next game's format
+will not have the same seven.
+
+`GameMember.rulesAckAt?: FsTimestamp` — set when the player scrolls to the end in the lobby, shown
+in the #88 roster so a GM can see who has not. Projected onto `roster` alongside it.
+
+CSV import in the #103 style (`number, section, text`), which is the workbook's Rules tab verbatim,
+and `cloneGame` (#65) carries the subcollection so "update the rules with lessons learned" is a diff
+rather than a retype.
+
+---
+
+## 112. After-action summary
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #112. Retention itself is already handled by #100's
+> 2026-09-06b fix (arrivals and trip latches survive when `config.locationTrail` is on).
+
+One doc, written by `onGameCleanupStart` **before** any purge, so a game that ran with the trail off
+— which is what Day 1 was — still leaves a record:
+
+```
+games/{gameId}/summary/report
+  plannedMinutes, actualMinutes, startedAt, endedAt
+  players: [{ playerId, name, joinedAt, outAt, survivedMinutes, rationsSubmitted, rationsMissed,
+              arrivals, killedBy? }]
+  deathsByWindow: [{ windowIndex, startedAt, deaths }]
+  checkpoints:    [{ checkpointId, name, arrivals, firstArrivalAt? }]
+  entries:        [{ entryId, name, trigger, fires, firstFiredAt? }]   // fires: 0 is the interesting row
+  runSheet:       [{ eventId, offsetMinutes, firedAt?, doneAt? }]      // planned vs actual
+  generatedAt
+```
+
+GM-readable, server-written. The rows that earn it are the zeros: on Day 1, voucher sites 3–5 never
+opened, the second drop never fired, and four of six ration windows never happened — none of which
+is visible anywhere today, and all of which is what the workbook's Drop Plan tab was trying to
+predict.
+
+---
+
+## 113. Death-toll cadence
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #113.
+
+`GameConfig.playerCountBroadcast` becomes tri-state rather than boolean — `'off' | 'interval' |
+'on-death'` — with `boolean` still accepted and mapped (`true → 'interval'`) so existing games and
+the settings modal keep working.
+
+`'on-death'` suppresses the seeded `auto_playercount_*` rows entirely and leans on the per-death
+broadcast, which already carries the count (*"Aaron has fallen — 11 tributes remain."*). That is the
+cheapest correct answer: on Day 1 the scheduled toll fired twice in 87 minutes while eleven death
+broadcasts carried an accurate count each time, and the GM still hand-typed a correction 76 seconds
+after the automatic one.
+
+Rule 26 promises players an update every 30 minutes, so whichever mode becomes the default, the
+rules text (#111) has to match it.
+
+---
+
+## 114. Notification channels
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #114.
+
+`UserProfile.stealthAlerts?: boolean`, denormalized onto the member doc by the existing
+`onUserPrefsWrite` trigger (#87) so the geofence's push path can read it without a second lookup —
+the same shape `mutedNotifications` already uses.
+
+Two Android channels instead of one — `critical` (vibrate-only when `stealthAlerts`, high
+importance) and `ambient` (silent, for the toll and other chatter) — with the iOS equivalent via
+interruption levels. `sendClassPush` picks the channel from the broadcast `kind`.
+
+Rule 27 currently asks players to solve this themselves (*"DO NOT KEEP YOUR PHONE ON SILENT…
+Importantly, though, loud phone notifications may also give away your position"*). It is a game
+mechanic wearing a settings toggle.
+
+---
+
+## 115. Kill attribution
+
+> **Not built.** [ROADMAP.md](ROADMAP.md) #115. Wants #105 for the manifest.
+
+```ts
+  // GameMember
+  killedBy?: string | null;        // uid, or null for environmental / starvation / GM
+  killedByName?: string | null;
+  deathManifest?: string;          // what was left at the death site
+```
+
+Self-reported on the #89 death screen (a picker over living members, plus "environment / not sure"),
+so it is honour-system like every other death report in this game. `killedBy` projects into #88's
+`roster` for a kill count in the standings; `deathManifest` hangs off the existing death-drop pin so
+the GM map row doubles as a retrieval list — which is precisely the purpose rule 21 states for
+leaving the bag.
+
+Pinned in `firestore.rules` after `outAt` is set, so a dead player cannot rewrite who killed them.
+
+---
+
 ## No schema change — enforcement / logic only
 
 These **outstanding** items are pure logic, rules, client architecture, or ops — no new fields or
@@ -702,6 +1142,16 @@ collections. (Shipped no-schema items — 20–28, 48–56, 58's prerequisites, 
 [ROADMAP.md](ROADMAP.md) Built & removed callout and git history.)
 
 - **47** Maps-key restriction — Cloud Console ops task.
+- **107** Entry presets / bulk authoring — `web/` only. Presets are client-side templates that
+  emit ordinary `RunbookEntry` docs; storing them would be a second authoring surface to maintain
+  for twelve rows of boilerplate. Shares #103’s validator.
+- **108** Sponsor gear distribution — generates targeted entries (`targeted` + `playerIds` +
+  `revealOnFire: 'targeted'`, all shipped in #80/#96). A bulk-authoring screen over #103, no new
+  fields.
+- **116** Bulk / random district assignment — `GameMember.district` already exists and the #5
+  suppression is built. This is a roster-wide write plus a paste-a-column importer; the reason it
+  matters is that **not one Day 1 member carries a district**, so a mechanic the game was designed
+  around never ran.
 - **85** ✅ *Built 2026-09-06 (roster) + 2026-09-06b (detail).* GM per-player overflow menu —
   mobile UI only; every action moved into the menu on both screens. Extracted to
   `components/PlayerActionSheet.tsx` so the two can't drift, with `<DistrictEditorModal>` as a
